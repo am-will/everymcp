@@ -26,11 +26,30 @@ Universal MCP server installer CLI. Add, remove, and manage [Model Context Proto
 
 ## Install
 
+### From npm (once published)
+
 ```bash
 npm install -g everymcp
 ```
 
-Or run directly:
+### From source
+
+```bash
+git clone https://github.com/am-will/everymcp.git
+cd everymcp
+npm install
+npm run build
+npm link
+```
+
+`npm link` creates a symlink so the `everymcp` command is available on your PATH. You can verify with:
+
+```bash
+which everymcp
+everymcp --version
+```
+
+### Run without installing
 
 ```bash
 npx everymcp
