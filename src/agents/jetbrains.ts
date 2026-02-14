@@ -1,75 +1,106 @@
-import { existsSync } from 'node:fs';
-
-import { addTypeField } from '../core/transformer.js';
-import type { ConfigPathInfo, ConfigScope, McpServerSpec, TransportType } from '../types/index.js';
-import { directoryExists, getPlatform, resolveConfigPath } from '../utils/platform.js';
+import path from 'node:path';
 import { BaseAdapter } from './base-adapter.js';
+import type { ConfigPathInfo, McpServerSpec } from '../types/index.js';
+import {
+  directoryExists,
+  getPlatform,
+  resolveConfigPath,
+} from '../utils/platform.js';
+
+const CONFIG_FILE = 'mcp.json';
+
+function getGlobalConfigPath(): string {
+  return resolveConfigPath(path.join('~/.junie/mcp', CONFIG_FILE));
+}
+
+function getProjectConfigPath(): string {
+  return resolveConfigPath('.junie/mcp/mcp.json');
+}
+
+function getJetBrainsToolboxPaths(): string[] {
+  const paths: string[] = [resolveConfigPath('~/.junie')];
+
+  if (getPlatform() === 'linux') {
+    paths.push(resolveConfigPath('~/.local/share/JetBrains/Toolbox'));
+    return paths;
+  }
+
+  if (getPlatform() === 'macos') {
+    paths.push(resolveConfigPath('~/Library/Application Support/JetBrains/Toolbox'));
+  }
+
+  return paths;
+}
+
+function buildServerConfig(spec: McpServerSpec): Record<string, unknown> {
+  const serverConfig: Record<string, unknown> = {
+    type: spec.transport === 'http' ? 'http' : 'stdio',
+  };
+
+  if (spec.command) {
+    serverConfig.command = spec.command;
+  }
+
+  if (spec.args && spec.args.length > 0) {
+    serverConfig.args = spec.args;
+  }
+
+  if (spec.url) {
+    serverConfig.url = spec.url;
+  }
+
+  if (spec.headers) {
+    serverConfig.headers = spec.headers;
+  }
+
+  if (spec.env) {
+    serverConfig.env = spec.env;
+  }
+
+  if (spec.oauth) {
+    serverConfig.oauth = spec.oauth;
+  }
+
+  return serverConfig;
+}
 
 export class JetBrainsAdapter extends BaseAdapter {
   id = 'jetbrains';
-  displayName = 'JetBrains IDEs';
-  supportedTransports: TransportType[] = ['stdio', 'http'];
-  supportedScopes: ConfigScope[] = ['global', 'project'];
+  displayName = 'JetBrains';
+  supportedTransports = ['stdio', 'http'] as const;
+  supportedScopes = ['global', 'project'] as const;
   restartRequired = false;
-  protected rootKey = 'servers';
+  rootKey = 'servers';
 
-  getConfigPaths(): ConfigPathInfo[] {
-    const globalPath = resolveConfigPath('~/.junie/mcp/mcp.json');
-    const projectPath = resolveConfigPath('.junie/mcp/mcp.json');
-
+  async getConfigPaths(): Promise<ConfigPathInfo[]> {
     return [
       {
         scope: 'global',
-        path: globalPath,
-        exists: existsSync(globalPath),
+        path: getGlobalConfigPath(),
+        exists: await directoryExists(getGlobalConfigPath()),
       },
       {
         scope: 'project',
-        path: projectPath,
-        exists: existsSync(projectPath),
+        path: getProjectConfigPath(),
+        exists: await directoryExists(getProjectConfigPath()),
       },
     ];
   }
 
   async detect(): Promise<boolean> {
-    const dirsToCheck = [resolveConfigPath('~/.junie/')];
-    const platform = getPlatform();
+    try {
+      const detectionPaths = getJetBrainsToolboxPaths();
+      const detectionChecks = detectionPaths.map((candidate) => directoryExists(candidate));
+      const results = await Promise.all(detectionChecks);
 
-    if (platform === 'linux') {
-      dirsToCheck.push(resolveConfigPath('~/.local/share/JetBrains/Toolbox/'));
-    } else if (platform === 'macos') {
-      dirsToCheck.push(resolveConfigPath('~/Library/Application Support/JetBrains/Toolbox/'));
-    } else if (platform === 'windows') {
-      dirsToCheck.push(resolveConfigPath('%LOCALAPPDATA%/JetBrains/Toolbox/'));
+      return results.some(Boolean);
+    } catch {
+      return false;
     }
-
-    const checks = await Promise.all(dirsToCheck.map((dir) => directoryExists(dir)));
-    return checks.some(Boolean);
   }
 
-  transformSpec(spec: McpServerSpec): Record<string, any> {
-    const transformed: Record<string, unknown> =
-      spec.transport === 'stdio'
-        ? {
-            command: spec.command ?? '',
-            args: spec.args ?? [],
-          }
-        : {
-            url: spec.url ?? '',
-          };
-
-    if (spec.env && Object.keys(spec.env).length > 0) {
-      transformed.env = { ...spec.env };
-    }
-
-    if (spec.transport === 'http' && spec.headers && Object.keys(spec.headers).length > 0) {
-      transformed.headers = { ...spec.headers };
-    }
-
-    return {
-      ...transformed,
-      ...addTypeField({}, spec.transport),
-    };
+  transformSpec(spec: McpServerSpec): Record<string, unknown> {
+    return buildServerConfig(spec);
   }
 }
 

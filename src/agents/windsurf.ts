@@ -1,87 +1,68 @@
-import { existsSync } from 'node:fs';
-import * as transformer from '../core/transformer.js';
-import type { ConfigPathInfo, ConfigScope, McpServerSpec, TransportType } from '../types/index.js';
 import { BaseAdapter } from './base-adapter.js';
+import { ConfigPathInfo, McpServerSpec } from '../types/index.js';
+import { directoryExists, fileExists, getPlatform, resolveConfigPath } from '../utils/platform.js';
 
-interface TransformerLike {
-  addExtraDefaults?: (
-    config: Record<string, unknown>,
-    fields: Record<string, unknown>,
-  ) => Record<string, unknown>;
-  addWindsurfFields?: (config: Record<string, unknown>) => Record<string, unknown>;
+function getGlobalConfigPath(): string {
+  if (getPlatform() === 'windows') {
+    return resolveConfigPath('%USERPROFILE%\\.codeium\\windsurf\\mcp_config.json');
+  }
+
+  return resolveConfigPath('~/.codeium/windsurf/mcp_config.json');
 }
-
-const transformUtils = transformer as TransformerLike;
 
 export class WindsurfAdapter extends BaseAdapter {
   id = 'windsurf';
   displayName = 'Windsurf';
-  supportedTransports: TransportType[] = ['stdio', 'http', 'sse'];
-  supportedScopes: ConfigScope[] = ['global'];
+  supportedTransports = ['stdio', 'http', 'sse'] as const;
+  supportedScopes = ['global'] as const;
   restartRequired = false;
-  protected rootKey = 'mcpServers';
+  rootKey = 'mcpServers';
+  detectionCommands = ['windsurf'];
 
-  getConfigPaths(): ConfigPathInfo[] {
-    const configPath = this.getGlobalConfigPath();
+  async detect(): Promise<boolean> {
+    if (await super.detect()) {
+      return true;
+    }
+
+    if (getPlatform() === 'windows') {
+      return directoryExists(resolveConfigPath('%USERPROFILE%\\.codeium\\windsurf'));
+    }
+
+    return directoryExists(resolveConfigPath('~/.codeium/windsurf'));
+  }
+
+  async getConfigPaths(): Promise<ConfigPathInfo[]> {
+    const configPath = getGlobalConfigPath();
+
     return [
       {
-        exists: existsSync(configPath),
-        path: configPath,
         scope: 'global',
+        path: configPath,
+        exists: await fileExists(configPath),
       },
     ];
   }
 
-  async detect(): Promise<boolean> {
-    try {
-      return this.directoryExists(this.getGlobalConfigDirectory());
-    } catch {
-      return false;
-    }
-  }
-
-  transformSpec(spec: McpServerSpec): Record<string, unknown> {
-    let config = this.toBaseServerConfig(spec);
-
-    if (spec.transport !== 'stdio' && typeof config.url === 'string') {
-      config = {
-        ...config,
-        serverUrl: config.url,
+  transformSpec(spec: McpServerSpec): Record<string, any> {
+    if (spec.transport === 'stdio') {
+      return {
+        ...(spec.command ? { command: spec.command } : null),
+        ...(spec.args ? { args: spec.args } : null),
+        ...(spec.env ? { env: spec.env } : null),
+        ...(spec.oauth ? { oauth: spec.oauth } : null),
+        disabled: false,
+        alwaysAllow: [],
       };
-      delete config.url;
     }
 
-    const addWindsurfFields = transformUtils.addWindsurfFields;
-    if (typeof addWindsurfFields === 'function') {
-      config = addWindsurfFields(config);
-    }
-
-    const addExtraDefaults = transformUtils.addExtraDefaults;
-    if (typeof addExtraDefaults === 'function') {
-      config = addExtraDefaults(config, { alwaysAllow: [], disabled: false });
-    } else {
-      if (!Array.isArray(config.alwaysAllow)) {
-        config.alwaysAllow = [];
-      }
-      if (typeof config.disabled !== 'boolean') {
-        config.disabled = false;
-      }
-    }
-
-    return config;
-  }
-
-  private getGlobalConfigPath(): string {
-    if (this.getPlatform() === 'windows') {
-      return this.resolvePath('%USERPROFILE%\\.codeium\\windsurf\\mcp_config.json');
-    }
-    return this.resolvePath('~/.codeium/windsurf/mcp_config.json');
-  }
-
-  private getGlobalConfigDirectory(): string {
-    if (this.getPlatform() === 'windows') {
-      return this.resolvePath('%USERPROFILE%\\.codeium\\windsurf');
-    }
-    return this.resolvePath('~/.codeium/windsurf');
+    return {
+      ...(spec.url ? { serverUrl: spec.url } : null),
+      ...(spec.headers ? { headers: spec.headers } : null),
+      ...(spec.oauth ? { oauth: spec.oauth } : null),
+      disabled: false,
+      alwaysAllow: [],
+    };
   }
 }
+
+export default WindsurfAdapter;

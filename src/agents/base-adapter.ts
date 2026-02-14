@@ -1,11 +1,9 @@
-import { existsSync } from 'node:fs';
-import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
-import { dirname } from 'node:path';
-import { homedir } from 'node:os';
-import { parse, type ParseError } from 'jsonc-parser';
-import * as configManager from '../core/config-manager.js';
-import * as platform from '../utils/platform.js';
-import type {
+import { promises as fs } from 'node:fs';
+import path from 'node:path';
+
+import { applyEdits, JSONPath, modify, ParseError, parse } from 'jsonc-parser';
+
+import {
   AgentAdapter,
   ConfigChange,
   ConfigPathInfo,
@@ -13,148 +11,61 @@ import type {
   McpServerSpec,
   TransportType,
 } from '../types/index.js';
+import { commandExists } from '../utils/platform.js';
 
-type JsonPath = Array<string | number>;
+export type RootKey = string | string[];
 
-interface ConfigManagerLike {
-  deepMergeServer?: (
-    source: string,
-    rootKey: string,
-    serverName: string,
-    serverConfig: Record<string, unknown>,
-  ) => Promise<string> | string;
-  readConfig?: (path: string) => Promise<unknown> | unknown;
-  removeProperty?: (source: string, path: JsonPath) => Promise<string> | string;
-  setProperty?: (
-    source: string,
-    path: JsonPath,
-    value: unknown,
-  ) => Promise<string> | string;
-  writeConfig?: (
-    path: string,
-    data: unknown,
-    originalSource?: string,
-  ) => Promise<void> | void;
+function isRecord(value: unknown): value is Record<string, any> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
-interface PlatformLike {
-  commandExists?: (command: string) => Promise<boolean> | boolean;
-  directoryExists?: (dir: string) => Promise<boolean> | boolean;
-  fileExists?: (file: string) => Promise<boolean> | boolean;
-  getPlatform?: () => 'macos' | 'linux' | 'windows';
-  resolveConfigPath?: (template: string) => string;
+function normalizeRootKey(rootKey: RootKey): string[] {
+  return Array.isArray(rootKey) ? [...rootKey] : [rootKey];
 }
 
-const manager = configManager as ConfigManagerLike;
-const platformUtils = platform as PlatformLike;
+function getByPath(data: unknown, parts: string[]): unknown {
+  let current = data;
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+  for (const part of parts) {
+    if (!isRecord(current) || !(part in current)) {
+      return undefined;
+    }
+
+    current = current[part];
+  }
+
+  return current;
+}
+
+function hasOwn(obj: Record<string, any>, key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(obj, key);
 }
 
 export abstract class BaseAdapter implements AgentAdapter {
   abstract id: string;
   abstract displayName: string;
-  abstract supportedTransports: TransportType[];
-  abstract supportedScopes: ConfigScope[];
+  abstract supportedTransports: readonly TransportType[];
+  abstract supportedScopes: readonly ConfigScope[];
   abstract restartRequired: boolean;
-  abstract getConfigPaths(): ConfigPathInfo[];
-  abstract transformSpec(spec: McpServerSpec): Record<string, unknown>;
 
-  protected rootKey = 'mcpServers';
+  protected rootKey: RootKey = 'mcpServers';
 
-  protected getRootPath(_scope: ConfigScope): JsonPath {
-    return [this.rootKey];
-  }
+  protected detectionCommands: string[] = [];
 
-  protected getConfigPathForScope(scope: ConfigScope): ConfigPathInfo | undefined {
-    return this.getConfigPaths().find((entry) => entry.scope === scope);
-  }
+  abstract getConfigPaths(): Promise<ConfigPathInfo[]>;
+  abstract transformSpec(spec: McpServerSpec): Record<string, any>;
 
-  protected async commandExists(command: string): Promise<boolean> {
-    if (typeof platformUtils.commandExists === 'function') {
-      return Boolean(await platformUtils.commandExists(command));
-    }
-
-    return false;
-  }
-
-  protected async directoryExists(path: string): Promise<boolean> {
-    if (typeof platformUtils.directoryExists === 'function') {
-      return Boolean(await platformUtils.directoryExists(path));
-    }
-
+  async detect(): Promise<boolean> {
     try {
-      return (await stat(path)).isDirectory();
+      const paths = await this.getConfigPaths();
+      if (paths.some((entry) => entry.exists)) {
+        return true;
+      }
+
+      return this.detectionCommands.some((command) => commandExists(command));
     } catch {
       return false;
     }
-  }
-
-  protected async fileExists(path: string): Promise<boolean> {
-    if (typeof platformUtils.fileExists === 'function') {
-      return Boolean(await platformUtils.fileExists(path));
-    }
-
-    try {
-      return (await stat(path)).isFile();
-    } catch {
-      return false;
-    }
-  }
-
-  protected getPlatform(): 'macos' | 'linux' | 'windows' {
-    if (typeof platformUtils.getPlatform === 'function') {
-      return platformUtils.getPlatform();
-    }
-
-    if (process.platform === 'darwin') {
-      return 'macos';
-    }
-    if (process.platform === 'win32') {
-      return 'windows';
-    }
-    return 'linux';
-  }
-
-  protected resolvePath(template: string): string {
-    if (typeof platformUtils.resolveConfigPath === 'function') {
-      return platformUtils.resolveConfigPath(template);
-    }
-
-    const home = homedir();
-    return template
-      .replace(/^~(?=$|\/|\\)/, home)
-      .replace(/%APPDATA%/g, process.env.APPDATA ?? '')
-      .replace(/%USERPROFILE%/g, process.env.USERPROFILE ?? home);
-  }
-
-  protected toBaseServerConfig(spec: McpServerSpec): Record<string, unknown> {
-    const config: Record<string, unknown> = {};
-
-    if (spec.command) {
-      config.command = spec.command;
-    }
-    if (spec.args && spec.args.length > 0) {
-      config.args = [...spec.args];
-    }
-    if (spec.url) {
-      config.url = spec.url;
-    }
-    if (spec.headers && Object.keys(spec.headers).length > 0) {
-      config.headers = { ...spec.headers };
-    }
-    if (spec.env && Object.keys(spec.env).length > 0) {
-      config.env = { ...spec.env };
-    }
-    if (spec.oauth) {
-      config.oauth = { ...spec.oauth };
-    }
-    if (typeof spec.disabled === 'boolean') {
-      config.disabled = spec.disabled;
-    }
-
-    return config;
   }
 
   supportsScope(scope: ConfigScope): boolean {
@@ -165,284 +76,201 @@ export abstract class BaseAdapter implements AgentAdapter {
     return this.supportedTransports.includes(transport);
   }
 
-  async detect(): Promise<boolean> {
-    try {
-      const paths = this.getConfigPaths();
-      return paths.some((pathInfo) => pathInfo.exists);
-    } catch {
-      return false;
-    }
-  }
-
-  async readServers(scope: ConfigScope): Promise<Record<string, unknown>> {
-    if (!this.supportsScope(scope)) {
+  async readServers(scope: ConfigScope): Promise<Record<string, any>> {
+    const configPath = await this.getConfigPathForScope(scope);
+    if (!configPath) {
       return {};
     }
 
-    const pathInfo = this.getConfigPathForScope(scope);
-    if (!pathInfo) {
-      return {};
-    }
+    const { data } = await this.readConfigDocument(configPath);
+    const rootPath = normalizeRootKey(this.getRootKey(scope));
+    const root = getByPath(data, rootPath);
 
-    const data = await this.readConfigObject(pathInfo.path);
-    const root = this.getFromPath(data, this.getRootPath(scope));
     return isRecord(root) ? root : {};
   }
 
   async addServer(spec: McpServerSpec, scope: ConfigScope): Promise<ConfigChange> {
-    const pathInfo = this.getConfigPathForScope(scope);
-    const configPath = pathInfo?.path ?? '';
-    const before = configPath ? await this.readConfigSource(configPath) : '{}\n';
     const warnings: string[] = [];
+    const configPath = await this.getConfigPathForScope(scope);
+
+    if (!configPath) {
+      warnings.push(`Scope '${scope}' is not configured for ${this.displayName}`);
+      return this.buildChange('add', spec.name, configPath ?? '', '', '', warnings.join('; '));
+    }
 
     if (!this.supportsScope(scope)) {
-      warnings.push(
-        `Scope "${scope}" is not supported by ${this.displayName}. Supported scopes: ${this.supportedScopes.join(', ')}`,
-      );
-      return this.buildChange('add', spec.name, configPath, before, before, warnings);
+      warnings.push(`Scope '${scope}' is not supported by ${this.displayName}`);
     }
 
     if (!this.supportsTransport(spec.transport)) {
-      warnings.push(
-        `Transport "${spec.transport}" is not supported by ${this.displayName}. Supported transports: ${this.supportedTransports.join(', ')}`,
-      );
-      return this.buildChange('add', spec.name, configPath, before, before, warnings);
+      warnings.push(`Transport '${spec.transport}' is not supported by ${this.displayName}`);
     }
 
-    if (!pathInfo) {
-      warnings.push(`No config path is available for scope "${scope}" in ${this.displayName}.`);
-      return this.buildChange('add', spec.name, configPath, before, before, warnings);
+    if (warnings.length > 0) {
+      const doc = await this.readConfigDocument(configPath);
+      return this.buildChange('add', spec.name, configPath, doc.source, doc.source, warnings.join('; '));
     }
+
+    const document = await this.readConfigDocument(configPath);
+    const existingServers = await this.readServers(scope);
+    const rootPath = normalizeRootKey(this.getRootKey(scope));
+
+    if (hasOwn(existingServers, spec.name)) {
+      warnings.push(`Server '${spec.name}' already exists in ${this.displayName}`);
+    }
+
+    const transformed = this.transformSpec(spec);
 
     try {
-      const existingServers = await this.readServers(scope);
-      if (Object.prototype.hasOwnProperty.call(existingServers, spec.name)) {
-        warnings.push(`Server "${spec.name}" already exists and will be overwritten.`);
-      }
-
-      const transformed = this.transformSpec(spec);
-      const serverPath = [...this.getRootPath(scope), spec.name];
-      const after = await this.applySetProperty(before, serverPath, transformed);
-
-      if (after !== before) {
-        await this.persistConfig(pathInfo.path, before, after);
-      }
+      const after = this.setJsonValue(document.source, [...rootPath, spec.name], transformed);
+      await this.writeConfig(configPath, after);
 
       if (this.restartRequired) {
-        warnings.push(`Restart ${this.displayName} to apply changes.`);
+        warnings.push('Restart required');
       }
 
-      return this.buildChange('add', spec.name, pathInfo.path, before, after, warnings);
+      return this.buildChange('add', spec.name, configPath, document.source, after, warnings.join('; ') || undefined);
     } catch (error) {
-      warnings.push(
-        `Failed to add server "${spec.name}" for ${this.displayName}: ${String(error)}`,
-      );
-      return this.buildChange('add', spec.name, pathInfo.path, before, before, warnings);
+      const message = error instanceof Error ? error.message : String(error);
+      warnings.push(`Failed to write config: ${message}`);
+      return this.buildChange('add', spec.name, configPath, document.source, document.source, warnings.join('; '));
     }
   }
 
   async removeServer(name: string, scope: ConfigScope): Promise<ConfigChange> {
-    const pathInfo = this.getConfigPathForScope(scope);
-    const configPath = pathInfo?.path ?? '';
-    const before = configPath ? await this.readConfigSource(configPath) : '{}\n';
     const warnings: string[] = [];
+    const configPath = await this.getConfigPathForScope(scope);
+
+    if (!configPath) {
+      warnings.push(`Scope '${scope}' is not configured for ${this.displayName}`);
+      return this.buildChange('remove', name, configPath ?? '', '', '', warnings.join('; '));
+    }
 
     if (!this.supportsScope(scope)) {
-      warnings.push(
-        `Scope "${scope}" is not supported by ${this.displayName}. Supported scopes: ${this.supportedScopes.join(', ')}`,
-      );
-      return this.buildChange('remove', name, configPath, before, before, warnings);
+      warnings.push(`Scope '${scope}' is not supported by ${this.displayName}`);
+      const doc = await this.readConfigDocument(configPath);
+      return this.buildChange('remove', name, configPath, doc.source, doc.source, warnings.join('; '));
     }
 
-    if (!pathInfo) {
-      warnings.push(`No config path is available for scope "${scope}" in ${this.displayName}.`);
-      return this.buildChange('remove', name, configPath, before, before, warnings);
+    const document = await this.readConfigDocument(configPath);
+    const existingServers = await this.readServers(scope);
+
+    if (!hasOwn(existingServers, name)) {
+      warnings.push(`Server '${name}' not found in ${this.displayName}`);
+      return this.buildChange('remove', name, configPath, document.source, document.source, warnings.join('; '));
     }
+
+    const rootPath = normalizeRootKey(this.getRootKey(scope));
+    const targetPath = [...rootPath, name];
 
     try {
-      const existingServers = await this.readServers(scope);
-      if (!Object.prototype.hasOwnProperty.call(existingServers, name)) {
-        warnings.push(`Server "${name}" not found.`);
-        return this.buildChange('remove', name, pathInfo.path, before, before, warnings);
-      }
-
-      const serverPath = [...this.getRootPath(scope), name];
-      const after = await this.applyRemoveProperty(before, serverPath);
-
-      if (after !== before) {
-        await this.persistConfig(pathInfo.path, before, after);
-      }
+      const after = this.removeJsonValue(document.source, targetPath);
+      await this.writeConfig(configPath, after);
 
       if (this.restartRequired) {
-        warnings.push(`Restart ${this.displayName} to apply changes.`);
+        warnings.push('Restart required');
       }
 
-      return this.buildChange('remove', name, pathInfo.path, before, after, warnings);
+      return this.buildChange('remove', name, configPath, document.source, after, warnings.join('; ') || undefined);
     } catch (error) {
-      warnings.push(
-        `Failed to remove server "${name}" for ${this.displayName}: ${String(error)}`,
-      );
-      return this.buildChange('remove', name, pathInfo.path, before, before, warnings);
+      const message = error instanceof Error ? error.message : String(error);
+      warnings.push(`Failed to write config: ${message}`);
+      return this.buildChange('remove', name, configPath, document.source, document.source, warnings.join('; '));
     }
   }
 
-  private async readConfigObject(configPath: string): Promise<Record<string, unknown>> {
-    if (typeof manager.readConfig === 'function') {
-      const parsed = await manager.readConfig(configPath);
-      return isRecord(parsed) ? parsed : {};
-    }
-
-    const source = await this.readConfigSource(configPath);
-    return this.parseJsonObject(source);
+  protected getRootKey(_scope: ConfigScope): RootKey {
+    return this.rootKey;
   }
 
-  private async readConfigSource(configPath: string): Promise<string> {
-    if (!existsSync(configPath)) {
-      return '{}\n';
-    }
-
-    try {
-      return await readFile(configPath, 'utf8');
-    } catch {
-      return '{}\n';
-    }
-  }
-
-  private parseJsonObject(source: string): Record<string, unknown> {
-    const errors: ParseError[] = [];
-    const parsed = parse(source, errors, {
-      allowEmptyContent: true,
-      allowTrailingComma: true,
-    });
-    if (errors.length > 0 || !isRecord(parsed)) {
-      return {};
-    }
-    return parsed;
-  }
-
-  private getFromPath(source: Record<string, unknown>, path: JsonPath): unknown {
-    let current: unknown = source;
-
-    for (const segment of path) {
-      if (!isRecord(current)) {
-        return undefined;
-      }
-      current = current[String(segment)];
-    }
-
-    return current;
-  }
-
-  private setPathValue(
-    source: Record<string, unknown>,
-    path: JsonPath,
-    value: unknown,
-  ): Record<string, unknown> {
-    if (path.length === 0) {
-      return source;
-    }
-
-    let cursor: Record<string, unknown> = source;
-
-    for (let i = 0; i < path.length - 1; i += 1) {
-      const segment = String(path[i]);
-      const next = cursor[segment];
-      if (!isRecord(next)) {
-        cursor[segment] = {};
-      }
-      cursor = cursor[segment] as Record<string, unknown>;
-    }
-
-    cursor[String(path[path.length - 1])] = value;
-    return source;
-  }
-
-  private removePathValue(source: Record<string, unknown>, path: JsonPath): Record<string, unknown> {
-    if (path.length === 0) {
-      return source;
-    }
-
-    let cursor: Record<string, unknown> = source;
-
-    for (let i = 0; i < path.length - 1; i += 1) {
-      const segment = String(path[i]);
-      const next = cursor[segment];
-      if (!isRecord(next)) {
-        return source;
-      }
-      cursor = next;
-    }
-
-    delete cursor[String(path[path.length - 1])];
-    return source;
-  }
-
-  private async applySetProperty(
-    source: string,
-    path: JsonPath,
-    value: unknown,
-  ): Promise<string> {
-    if (
-      path.length === 2 &&
-      typeof path[0] === 'string' &&
-      !path[0].includes('.') &&
-      typeof path[1] === 'string' &&
-      typeof manager.deepMergeServer === 'function'
-    ) {
-      return manager.deepMergeServer(
-        source,
-        path[0],
-        path[1],
-        isRecord(value) ? value : { value },
-      );
-    }
-
-    if (typeof manager.setProperty === 'function') {
-      return manager.setProperty(source, path, value);
-    }
-
-    const parsed = this.parseJsonObject(source);
-    const next = this.setPathValue(parsed, path, value);
-    return `${JSON.stringify(next, null, 2)}\n`;
-  }
-
-  private async applyRemoveProperty(source: string, path: JsonPath): Promise<string> {
-    if (typeof manager.removeProperty === 'function') {
-      return manager.removeProperty(source, path);
-    }
-
-    const parsed = this.parseJsonObject(source);
-    const next = this.removePathValue(parsed, path);
-    return `${JSON.stringify(next, null, 2)}\n`;
-  }
-
-  private async persistConfig(configPath: string, before: string, after: string): Promise<void> {
-    if (typeof manager.writeConfig === 'function') {
-      const parsedAfter = this.parseJsonObject(after);
-      await manager.writeConfig(configPath, parsedAfter, before);
-      return;
-    }
-
-    await mkdir(dirname(configPath), { recursive: true });
-    await writeFile(configPath, after, 'utf8');
-  }
-
-  private buildChange(
+  protected buildChange(
     action: 'add' | 'remove',
     serverName: string,
     configPath: string,
     before: string,
     after: string,
-    warnings: string[],
+    warning?: string,
   ): ConfigChange {
     return {
-      action,
-      after,
       agent: this.id,
-      before,
       configPath,
+      before,
+      after,
+      action,
       serverName,
-      warning: warnings.length > 0 ? warnings.join(' ') : undefined,
+      warning,
     };
+  }
+
+  protected getConfigPathForScope(scope: ConfigScope): Promise<string | undefined> {
+    return this.getConfigPaths().then((paths) => paths.find((item) => item.scope === scope)?.path);
+  }
+
+  protected async readConfigDocument(configPath: string): Promise<{
+    source: string;
+    data: Record<string, any>;
+  }> {
+    let source = '';
+
+    try {
+      source = await fs.readFile(configPath, 'utf8');
+    } catch {
+      source = '';
+    }
+
+    const normalizedSource = source.trim().length === 0 ? '{}\n' : source;
+    const parseErrors: ParseError[] = [];
+    const parsed = parse(normalizedSource, parseErrors, {
+      allowTrailingComma: true,
+      disallowComments: false,
+      allowEmptyContent: true,
+    }) as unknown;
+
+    const data = isRecord(parsed) ? parsed : {};
+
+    return {
+      source: normalizedSource,
+      data,
+    };
+  }
+
+  protected setJsonValue(source: string, jsonPath: string[], value: unknown): string {
+    const edits = modify(source, jsonPath as JSONPath, value, {
+      formattingOptions: {
+        tabSize: 2,
+        insertSpaces: true,
+        eol: '\n',
+      },
+    });
+
+    if (edits.length === 0) {
+      return source;
+    }
+
+    return applyEdits(source, edits);
+  }
+
+  protected removeJsonValue(source: string, jsonPath: string[]): string {
+    const edits = modify(source, jsonPath as JSONPath, undefined, {
+      formattingOptions: {
+        tabSize: 2,
+        insertSpaces: true,
+        eol: '\n',
+      },
+    });
+
+    if (edits.length === 0) {
+      return source;
+    }
+
+    return applyEdits(source, edits);
+  }
+
+  protected async writeConfig(configPath: string, source: string): Promise<void> {
+    await fs.mkdir(path.dirname(configPath), { recursive: true });
+
+    const tmpPath = `${configPath}.tmp-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    await fs.writeFile(tmpPath, source, 'utf8');
+    await fs.rename(tmpPath, configPath);
   }
 }

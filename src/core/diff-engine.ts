@@ -1,32 +1,31 @@
-import { readFile } from "node:fs/promises";
-import { applyEdits, modify, parse } from "jsonc-parser";
-import { createPatch } from "diff";
+import { readFile } from 'node:fs/promises';
+import { applyEdits, modify, parse, type ParseError } from 'jsonc-parser';
+import { createPatch } from 'diff';
 
 import type {
   AgentAdapter,
   ConfigChange,
   ConfigScope,
   McpServerSpec,
-} from "../types/index.js";
-import { removeProperty, setProperty } from "./config-manager.js";
+} from '../types/index.js';
 
-type JsonPath = Array<string | number>;
+export type JsonPatchPath = Array<string | number>;
 
-const FORMAT_OPTIONS = {
-  eol: "\n",
-  insertSpaces: true,
-  tabSize: 2,
-};
-
-const COMMON_SERVER_ROOTS: JsonPath[] = [
-  ["mcpServers"],
-  ["servers"],
-  ["mcp", "servers"],
-  ["cody", "mcpServers"],
+const COMMON_SERVER_ROOTS: JsonPatchPath[] = [
+  ['mcpServers'],
+  ['servers'],
+  ['mcp', 'servers'],
+  ['cody', 'mcpServers'],
 ];
 
-const ADAPTER_ROOT_HINTS: Record<string, JsonPath> = {
-  cody: ["cody", "mcpServers"],
+const ADAPTER_ROOT_HINTS: Record<string, JsonPatchPath> = {
+  cody: ['cody', 'mcpServers'],
+};
+
+const JSON_FORMAT = {
+  eol: '\n',
+  insertSpaces: true,
+  tabSize: 2,
 };
 
 export function generateDiff(
@@ -35,15 +34,15 @@ export function generateDiff(
   newContent: string,
 ): string {
   if (currentContent === newContent) {
-    return "";
+    return '';
   }
 
   return createPatch(
     configPath,
     currentContent,
     newContent,
-    "before",
-    "after",
+    'before',
+    'after',
     { context: 3, stripTrailingCr: true },
   );
 }
@@ -58,74 +57,36 @@ export async function previewAdd(
   const before = await readConfigSource(configPath);
 
   if (!adapterSupportsScope(adapter, scope)) {
-    warnings.push(
-      `Scope '${scope}' is not supported by '${adapter.id}'; preview only, no changes.`,
-    );
-    return createChange(
-      adapter.id,
-      configPath,
-      before,
-      before,
-      "add",
-      spec.name,
-      warnings,
-    );
+    warnings.push(`Scope '${scope}' is not supported by '${adapter.id}'.`);
+    return makeChange(adapter, configPath, spec.name, before, before, 'add', warnings);
   }
 
   if (!adapterSupportsTransport(adapter, spec.transport)) {
     warnings.push(
-      `Transport '${spec.transport}' is not supported by '${adapter.id}'; preview only, no changes.`,
+      `Transport '${spec.transport}' is not supported by '${adapter.id}'.`,
     );
-    return createChange(
-      adapter.id,
-      configPath,
-      before,
-      before,
-      "add",
-      spec.name,
-      warnings,
-    );
+    return makeChange(adapter, configPath, spec.name, before, before, 'add', warnings);
   }
 
   const existingServers = await readExistingServers(adapter, scope);
   if (Object.prototype.hasOwnProperty.call(existingServers, spec.name)) {
-    warnings.push(
-      `Server '${spec.name}' already exists for '${adapter.id}'; no diff.`,
-    );
-    return createChange(
-      adapter.id,
-      configPath,
-      before,
-      before,
-      "add",
-      spec.name,
-      warnings,
-    );
+    warnings.push(`Server '${spec.name}' already exists; no changes will be made.`);
+    return makeChange(adapter, configPath, spec.name, before, before, 'add', warnings);
   }
 
   const rootPath = inferServerRootPath(adapter, before, existingServers);
   const transformedSpec = adapter.transformSpec(spec);
-  const after = await applySetProperty(
-    before,
-    [...rootPath, spec.name],
-    transformedSpec,
-  );
+  const after = await applySetProperty(before, [...rootPath, spec.name], transformedSpec);
 
-  if (adapter.restartRequired) {
-    warnings.push(
-      `'${adapter.displayName ?? adapter.id}' may require restart after apply.`,
-    );
+  if (after === before) {
+    warnings.push('Unable to compute a config diff for add preview.');
   }
 
-  return createChange(
-    adapter.id,
-    configPath,
-    before,
-    after,
-    "add",
-    spec.name,
-    warnings,
-  );
+  if (adapter.restartRequired) {
+    warnings.push('Restart may be required after applying changes.');
+  }
+
+  return makeChange(adapter, configPath, spec.name, before, after, 'add', warnings);
 }
 
 export async function previewRemove(
@@ -138,123 +99,77 @@ export async function previewRemove(
   const before = await readConfigSource(configPath);
 
   if (!adapterSupportsScope(adapter, scope)) {
-    warnings.push(
-      `Scope '${scope}' is not supported by '${adapter.id}'; preview only, no changes.`,
-    );
-    return createChange(
-      adapter.id,
-      configPath,
-      before,
-      before,
-      "remove",
-      serverName,
-      warnings,
-    );
+    warnings.push(`Scope '${scope}' is not supported by '${adapter.id}'.`);
+    return makeChange(adapter, configPath, serverName, before, before, 'remove', warnings);
   }
 
   const existingServers = await readExistingServers(adapter, scope);
   if (!Object.prototype.hasOwnProperty.call(existingServers, serverName)) {
-    warnings.push(
-      `Server '${serverName}' was not found for '${adapter.id}'; no diff.`,
-    );
-    return createChange(
-      adapter.id,
-      configPath,
-      before,
-      before,
-      "remove",
-      serverName,
-      warnings,
-    );
+    warnings.push(`Server '${serverName}' not found for '${adapter.id}'.`);
+    return makeChange(adapter, configPath, serverName, before, before, 'remove', warnings);
   }
 
   const rootPath = inferServerRootPath(adapter, before, existingServers);
   const after = await applyRemoveProperty(before, [...rootPath, serverName]);
 
-  if (before === after) {
-    warnings.push(
-      `Server '${serverName}' was found but produced no text edit for '${adapter.id}'.`,
-    );
+  if (after === before) {
+    warnings.push('Unable to compute a config diff for remove preview.');
   }
 
   if (adapter.restartRequired) {
-    warnings.push(
-      `'${adapter.displayName ?? adapter.id}' may require restart after apply.`,
-    );
+    warnings.push('Restart may be required after applying changes.');
   }
 
-  return createChange(
-    adapter.id,
-    configPath,
-    before,
-    after,
-    "remove",
-    serverName,
-    warnings,
-  );
+  return makeChange(adapter, configPath, serverName, before, after, 'remove', warnings);
 }
 
 export async function previewChanges(
   adapters: AgentAdapter[],
   spec: McpServerSpec,
   scope: ConfigScope,
-  action: "add" | "remove",
+  action: 'add' | 'remove',
 ): Promise<ConfigChange[]> {
-  const jobs = adapters.map(async (adapter) => {
+  const tasks = adapters.map(async (adapter) => {
     try {
-      if (action === "add") {
+      if (action === 'add') {
         return await previewAdd(adapter, spec, scope);
-      }
-
-      if (!spec.name) {
-        return createChange(adapter.id, "<unknown>", "{}", "{}", "remove", "", [
-          "Missing server name for remove preview; no diff.",
-        ]);
       }
 
       return await previewRemove(adapter, spec.name, scope);
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      return createChange(
-        adapter.id,
-        "<unknown>",
-        "{}",
-        "{}",
-        action,
-        spec.name,
-        [`Preview failed for '${adapter.id}': ${message}`],
-      );
+      const configPath = await resolveConfigPath(adapter, scope);
+      const warning = error instanceof Error ? error.message : String(error);
+      return makeChange(adapter, configPath, spec.name, '', '', action, [
+        `Preview failed for '${adapter.id}': ${warning}`,
+      ]);
     }
   });
 
-  return Promise.all(jobs);
+  return Promise.all(tasks);
 }
 
-function createChange(
-  agent: string,
+function makeChange(
+  adapter: AgentAdapter,
   configPath: string,
+  serverName: string,
   before: string,
   after: string,
-  action: "add" | "remove",
-  serverName: string,
+  action: 'add' | 'remove',
   warnings: string[],
 ): ConfigChange {
   return {
     action,
-    after,
-    agent,
+    agent: adapter.id,
     before,
+    after,
     configPath,
     serverName,
-    warning: warnings.length > 0 ? warnings.join(" ") : undefined,
+    warning: warnings.length > 0 ? warnings.join(' ') : undefined,
   };
 }
 
-function adapterSupportsScope(
-  adapter: AgentAdapter,
-  scope: ConfigScope,
-): boolean {
-  if (typeof adapter.supportsScope === "function") {
+function adapterSupportsScope(adapter: AgentAdapter, scope: ConfigScope): boolean {
+  if (typeof adapter.supportsScope === 'function') {
     return adapter.supportsScope(scope);
   }
 
@@ -263,31 +178,42 @@ function adapterSupportsScope(
 
 function adapterSupportsTransport(
   adapter: AgentAdapter,
-  transport: McpServerSpec["transport"],
+  transport: McpServerSpec['transport'],
 ): boolean {
-  if (typeof adapter.supportsTransport === "function") {
+  if (typeof adapter.supportsTransport === 'function') {
     return adapter.supportsTransport(transport);
   }
 
   return adapter.supportedTransports.includes(transport);
 }
 
-async function resolveConfigPath(
-  adapter: AgentAdapter,
-  scope: ConfigScope,
-): Promise<string> {
-  const paths = adapter.getConfigPaths();
-  const scoped = paths.filter((path) => path.scope === scope);
+async function resolveConfigPath(adapter: AgentAdapter, scope: ConfigScope): Promise<string> {
+  const paths = await Promise.resolve(adapter.getConfigPaths?.()).catch(() => []);
+  const scoped = paths.filter((entry) => entry.scope === scope);
   const candidates = scoped.length > 0 ? scoped : paths;
-  const chosen = candidates.find((path) => path.exists) ?? candidates[0];
+  const chosen = candidates.find((entry) => entry.exists) ?? candidates[0];
   return chosen?.path ?? `<${adapter.id}:${scope}>`;
+}
+
+function parseJsonSource(source: string): Record<string, unknown> {
+  const errors: ParseError[] = [];
+  const parsed = parse(source, errors, {
+    allowEmptyContent: true,
+    allowTrailingComma: true,
+  });
+
+  if (errors.length > 0 || parsed == null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return {};
+  }
+
+  return parsed as Record<string, unknown>;
 }
 
 async function readConfigSource(configPath: string): Promise<string> {
   try {
-    return await readFile(configPath, "utf8");
+    return await readFile(configPath, 'utf8');
   } catch {
-    return "{}";
+    return '{}';
   }
 }
 
@@ -297,7 +223,7 @@ async function readExistingServers(
 ): Promise<Record<string, unknown>> {
   try {
     const servers = await adapter.readServers(scope);
-    return servers ?? {};
+    return servers == null || typeof servers !== 'object' ? {} : servers;
   } catch {
     return {};
   }
@@ -305,30 +231,34 @@ async function readExistingServers(
 
 async function applySetProperty(
   source: string,
-  path: JsonPath,
+  path: JsonPatchPath,
   value: unknown,
 ): Promise<string> {
   try {
-    return await Promise.resolve(setProperty(source, path, value));
-  } catch {
     const edits = modify(source, path, value, {
-      formattingOptions: FORMAT_OPTIONS,
+      formattingOptions: JSON_FORMAT,
     });
+
     return applyEdits(source, edits);
+  } catch {
+    const fallback = setByClone(parseJsonSource(source), path, value);
+    return `${JSON.stringify(fallback, null, 2)}\n`;
   }
 }
 
 async function applyRemoveProperty(
   source: string,
-  path: JsonPath,
+  path: JsonPatchPath,
 ): Promise<string> {
   try {
-    return await Promise.resolve(removeProperty(source, path));
-  } catch {
     const edits = modify(source, path, undefined, {
-      formattingOptions: FORMAT_OPTIONS,
+      formattingOptions: JSON_FORMAT,
     });
+
     return applyEdits(source, edits);
+  } catch {
+    const fallback = removeByClone(parseJsonSource(source), path);
+    return `${JSON.stringify(fallback, null, 2)}\n`;
   }
 }
 
@@ -336,18 +266,18 @@ function inferServerRootPath(
   adapter: AgentAdapter,
   source: string,
   existingServers: Record<string, unknown>,
-): JsonPath {
-  const hintedPath = readAdapterRootHint(adapter);
-  if (hintedPath) {
-    return hintedPath;
+): JsonPatchPath {
+  const hint = readAdapterRootHint(adapter);
+  if (hint) {
+    return hint;
   }
 
-  const parsed = parse(source) as Record<string, unknown>;
+  const parsed = parseJsonSource(source);
   const existingNames = Object.keys(existingServers);
 
   for (const rootPath of COMMON_SERVER_ROOTS) {
-    const node = getValueAtPath(parsed, rootPath);
-    if (!isPlainObject(node)) {
+    const rootNode = getValueAtPath(parsed, rootPath);
+    if (!isRecord(rootNode)) {
       continue;
     }
 
@@ -355,19 +285,19 @@ function inferServerRootPath(
       return rootPath;
     }
 
-    const hasKnownServer = existingNames.some((name) =>
-      Object.prototype.hasOwnProperty.call(node, name),
+    const containsKnownServer = existingNames.some((name) =>
+      Object.prototype.hasOwnProperty.call(rootNode, name),
     );
-    if (hasKnownServer) {
+    if (containsKnownServer) {
       return rootPath;
     }
   }
 
-  return ADAPTER_ROOT_HINTS[adapter.id] ?? ["mcpServers"];
+  return ADAPTER_ROOT_HINTS[adapter.id] ?? ['mcpServers'];
 }
 
-function readAdapterRootHint(adapter: AgentAdapter): JsonPath | null {
-  const hintedAdapter = adapter as unknown as {
+function readAdapterRootHint(adapter: AgentAdapter): JsonPatchPath | null {
+  const candidate = adapter as unknown as {
     serverPath?: unknown;
     serverRootPath?: unknown;
     mcpServersPath?: unknown;
@@ -375,20 +305,16 @@ function readAdapterRootHint(adapter: AgentAdapter): JsonPath | null {
     getServerRootPath?: () => unknown;
   };
 
-  const rawHints: unknown[] = [
-    hintedAdapter.serverPath,
-    hintedAdapter.serverRootPath,
-    hintedAdapter.mcpServersPath,
-    typeof hintedAdapter.getServerPath === "function"
-      ? hintedAdapter.getServerPath()
-      : null,
-    typeof hintedAdapter.getServerRootPath === "function"
-      ? hintedAdapter.getServerRootPath()
-      : null,
+  const candidates: unknown[] = [
+    candidate.serverPath,
+    candidate.serverRootPath,
+    candidate.mcpServersPath,
+    typeof candidate.getServerPath === 'function' ? candidate.getServerPath() : null,
+    typeof candidate.getServerRootPath === 'function' ? candidate.getServerRootPath() : null,
   ];
 
-  for (const hint of rawHints) {
-    const normalized = normalizePath(hint);
+  for (const raw of candidates) {
+    const normalized = normalizeJsonPath(raw);
     if (normalized) {
       return normalized;
     }
@@ -397,37 +323,91 @@ function readAdapterRootHint(adapter: AgentAdapter): JsonPath | null {
   return null;
 }
 
-function normalizePath(input: unknown): JsonPath | null {
+function normalizeJsonPath(input: unknown): JsonPatchPath | null {
   if (Array.isArray(input)) {
-    const cleaned = input.filter(
+    const output = input.filter(
       (segment): segment is string | number =>
-        typeof segment === "string" || typeof segment === "number",
+        typeof segment === 'string' || typeof segment === 'number',
     );
-    return cleaned.length > 0 ? cleaned : null;
+    return output.length > 0 ? output : null;
   }
 
-  if (typeof input === "string" && input.trim().length > 0) {
-    const parts = input
-      .split(".")
+  if (typeof input === 'string' && input.trim().length > 0) {
+    const path = input
+      .split('.')
       .map((part) => part.trim())
       .filter(Boolean);
-    return parts.length > 0 ? parts : null;
+
+    return path.length > 0 ? path : null;
   }
 
   return null;
 }
 
-function getValueAtPath(root: unknown, path: JsonPath): unknown {
+function getValueAtPath(root: Record<string, unknown>, path: JsonPatchPath): unknown {
   let cursor: unknown = root;
   for (const segment of path) {
-    if (!isPlainObject(cursor)) {
+    if (!isRecord(cursor)) {
       return undefined;
     }
-    cursor = (cursor as Record<string, unknown>)[String(segment)];
+    cursor = cursor[String(segment)];
   }
   return cursor;
 }
 
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function setByClone(
+  source: Record<string, unknown>,
+  path: JsonPatchPath,
+  value: unknown,
+): Record<string, unknown> {
+  const cloned = structuredClone(source) as Record<string, unknown>;
+  if (path.length === 0) {
+    return cloned;
+  }
+
+  let cursor = cloned as Record<string, unknown>;
+  for (let i = 0; i < path.length - 1; i += 1) {
+    const segment = String(path[i]);
+    const next = cursor[segment];
+
+    if (!isRecord(next)) {
+      cursor[segment] = {};
+      cursor = cursor[segment] as Record<string, unknown>;
+      continue;
+    }
+
+    cursor = next;
+  }
+
+  cursor[String(path[path.length - 1])] = value;
+  return cloned;
+}
+
+function removeByClone(
+  source: Record<string, unknown>,
+  path: JsonPatchPath,
+): Record<string, unknown> {
+  const cloned = structuredClone(source) as Record<string, unknown>;
+  if (path.length === 0) {
+    return cloned;
+  }
+
+  let cursor = cloned as Record<string, unknown>;
+  for (let i = 0; i < path.length - 1; i += 1) {
+    const segment = String(path[i]);
+    const next = cursor[segment];
+
+    if (!isRecord(next)) {
+      return cloned;
+    }
+
+    cursor = next;
+  }
+
+  delete cursor[String(path[path.length - 1])];
+  return cloned;
 }

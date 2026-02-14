@@ -1,136 +1,120 @@
-import type { AgentAdapter, DetectedAgent } from '../types/index.js';
+import type { AgentAdapter, ConfigPathInfo, DetectedAgent } from '../types/index.js';
+import * as claudeCodeModule from './claude-code.js';
+import * as codexModule from './codex.js';
+import * as claudeDesktopModule from './claude-desktop.js';
+import * as clineModule from './cline.js';
+import * as codyModule from './cody.js';
+import * as cursorModule from './cursor.js';
+import * as geminiCliModule from './gemini-cli.js';
+import * as jetbrainsModule from './jetbrains.js';
+import * as neovimModule from './neovim.js';
+import * as rooCodeModule from './roo-code.js';
+import * as vscodeModule from './vscode.js';
+import * as windsurfModule from './windsurf.js';
+import * as zedModule from './zed.js';
+import * as amazonQModule from './amazon-q.js';
+import * as kiloCodeModule from './kilo-code.js';
 
-import * as AmazonQModule from './amazon-q.js';
-import * as ClaudeCodeModule from './claude-code.js';
-import * as ClaudeDesktopModule from './claude-desktop.js';
-import * as ClineModule from './cline.js';
-import * as CodyModule from './cody.js';
-import * as CursorModule from './cursor.js';
-import * as GeminiCliModule from './gemini-cli.js';
-import * as JetBrainsModule from './jetbrains.js';
-import * as KiloCodeModule from './kilo-code.js';
-import * as NeovimModule from './neovim.js';
-import * as RooCodeModule from './roo-code.js';
-import * as VSCodeModule from './vscode.js';
-import * as WindsurfModule from './windsurf.js';
-import * as ZedModule from './zed.js';
+type AdapterModule = Record<string, unknown>;
+type AdapterConstructor = new () => AgentAdapter;
 
-type AdapterCtor = new () => AgentAdapter;
-
-function resolveAdapterCtor(moduleExports: Record<string, unknown>, preferredExport: string): AdapterCtor {
-  const preferred = moduleExports[preferredExport];
-  if (typeof preferred === 'function') {
-    return preferred as AdapterCtor;
-  }
-
-  const maybeDefault = moduleExports.default;
-  if (typeof maybeDefault === 'function') {
-    return maybeDefault as AdapterCtor;
-  }
-
-  for (const value of Object.values(moduleExports)) {
-    if (typeof value === 'function') {
-      return value as AdapterCtor;
+function resolveAdapter(
+  moduleRef: AdapterModule,
+  adapterName: string,
+  candidateNames: string[],
+): AgentAdapter {
+  for (const candidate of candidateNames) {
+    const ctor = moduleRef[candidate];
+    if (typeof ctor === 'function') {
+      return new (ctor as AdapterConstructor)();
     }
   }
 
-  throw new Error(`Unable to resolve adapter constructor: ${preferredExport}`);
+  const fallback = Object.entries(moduleRef).find(
+    ([name, value]) => name.endsWith('Adapter') && typeof value === 'function',
+  );
+
+  if (fallback) {
+    const [, ctor] = fallback;
+    return new (ctor as AdapterConstructor)();
+  }
+
+  throw new Error(`Unable to resolve adapter class for ${adapterName}`);
 }
 
-function buildDefaultAdapters(): AgentAdapter[] {
-  return [
-    new (resolveAdapterCtor(ClaudeDesktopModule as Record<string, unknown>, 'ClaudeDesktopAdapter'))(),
-    new (resolveAdapterCtor(ClaudeCodeModule as Record<string, unknown>, 'ClaudeCodeAdapter'))(),
-    new (resolveAdapterCtor(CursorModule as Record<string, unknown>, 'CursorAdapter'))(),
-    new (resolveAdapterCtor(WindsurfModule as Record<string, unknown>, 'WindsurfAdapter'))(),
-    new (resolveAdapterCtor(VSCodeModule as Record<string, unknown>, 'VSCodeAdapter'))(),
-    new (resolveAdapterCtor(ZedModule as Record<string, unknown>, 'ZedAdapter'))(),
-    new (resolveAdapterCtor(CodyModule as Record<string, unknown>, 'CodyAdapter'))(),
-    new (resolveAdapterCtor(ClineModule as Record<string, unknown>, 'ClineAdapter'))(),
-    new (resolveAdapterCtor(RooCodeModule as Record<string, unknown>, 'RooCodeAdapter'))(),
-    new (resolveAdapterCtor(JetBrainsModule as Record<string, unknown>, 'JetBrainsAdapter'))(),
-    new (resolveAdapterCtor(NeovimModule as Record<string, unknown>, 'NeovimAdapter'))(),
-    new (resolveAdapterCtor(KiloCodeModule as Record<string, unknown>, 'KiloCodeAdapter'))(),
-    new (resolveAdapterCtor(AmazonQModule as Record<string, unknown>, 'AmazonQAdapter'))(),
-    new (resolveAdapterCtor(GeminiCliModule as Record<string, unknown>, 'GeminiCliAdapter'))(),
-  ];
-}
+const ADAPTERS: AgentAdapter[] = [
+  resolveAdapter(claudeDesktopModule, 'Claude Desktop', ['ClaudeDesktopAdapter', 'ClaudeDesktop', 'default']),
+  resolveAdapter(claudeCodeModule, 'Claude Code', ['ClaudeCodeAdapter', 'ClaudeCode', 'default']),
+  resolveAdapter(codexModule, 'OpenAI Codex', ['CodexAdapter', 'Codex', 'default']),
+  resolveAdapter(cursorModule, 'Cursor', ['CursorAdapter', 'Cursor', 'default']),
+  resolveAdapter(windsurfModule, 'Windsurf', ['WindsurfAdapter', 'Windsurf', 'default']),
+  resolveAdapter(vscodeModule, 'VS Code', ['VSCodeAdapter', 'VscodeAdapter', 'VisualStudioCodeAdapter', 'default']),
+  resolveAdapter(zedModule, 'Zed', ['ZedAdapter', 'Zed', 'default']),
+  resolveAdapter(codyModule, 'Sourcegraph Cody', ['CodyAdapter', 'Cody', 'default']),
+  resolveAdapter(clineModule, 'Cline', ['ClineAdapter', 'Cline', 'default']),
+  resolveAdapter(rooCodeModule, 'Roo Code', ['RooCodeAdapter', 'RooCode', 'default']),
+  resolveAdapter(jetbrainsModule, 'JetBrains', ['JetBrainsAdapter', 'JetbrainsAdapter', 'JetBrainsMCPAdapter', 'default']),
+  resolveAdapter(neovimModule, 'Neovim', ['NeovimAdapter', 'Neovim', 'default']),
+  resolveAdapter(kiloCodeModule, 'Kilo Code', ['KiloCodeAdapter', 'KiloCode', 'default']),
+  resolveAdapter(amazonQModule, 'Amazon Q', ['AmazonQAdapter', 'AmazonQ', 'default']),
+  resolveAdapter(geminiCliModule, 'Gemini CLI', ['GeminiCliAdapter', 'GeminiCLIAdapter', 'GeminiCli', 'GeminiCLI', 'default']),
+];
 
-export class AgentRegistry {
-  private readonly adapters: AgentAdapter[];
-  private readonly adaptersById: Map<string, AgentAdapter>;
-  private detectedAgents: DetectedAgent[] = [];
-
-  constructor(adapters: AgentAdapter[] = buildDefaultAdapters()) {
-    this.adapters = [...adapters];
-    this.adaptersById = new Map(this.adapters.map((adapter) => [adapter.id, adapter]));
-  }
-
-  getAdapter(id: string): AgentAdapter | undefined {
-    return this.adaptersById.get(id);
-  }
-
-  getAllAdapters(): AgentAdapter[] {
-    return [...this.adapters];
-  }
-
-  getDetectedAdapters(): DetectedAgent[] {
-    return this.detectedAgents.filter((entry) => entry.detected);
-  }
-
-  async detectAll(): Promise<DetectedAgent[]> {
-    const detectionResults = await Promise.allSettled(
-      this.adapters.map(async (adapter) => {
-        const detected = await adapter.detect();
-        return {
-          adapter,
-          detected,
-          configPaths: adapter.getConfigPaths(),
-        } satisfies DetectedAgent;
-      }),
+async function safeConfigPaths(adapter: AgentAdapter): Promise<ConfigPathInfo[]> {
+  try {
+    return await adapter.getConfigPaths();
+  } catch (error) {
+    console.warn(
+      `Warning: failed to read config paths for ${adapter.displayName} (${adapter.id}):`,
+      error instanceof Error ? error.message : String(error),
     );
-
-    const detectedAgents: DetectedAgent[] = [];
-
-    for (let index = 0; index < detectionResults.length; index += 1) {
-      const result = detectionResults[index];
-      const adapter = this.adapters[index];
-
-      if (result.status === 'fulfilled') {
-        detectedAgents.push(result.value);
-        continue;
-      }
-
-      const reasonMessage =
-        result.reason instanceof Error ? result.reason.message : String(result.reason);
-      console.warn(`[everymcp] Adapter detection failed for "${adapter.id}": ${reasonMessage}`);
-
-      detectedAgents.push({
-        adapter,
-        detected: false,
-        configPaths: adapter.getConfigPaths(),
-      });
-    }
-
-    this.detectedAgents = detectedAgents;
-    return detectedAgents;
+    return [];
   }
-}
-
-export const agentRegistry = new AgentRegistry();
-
-export async function detectAll(): Promise<DetectedAgent[]> {
-  return agentRegistry.detectAll();
-}
-
-export function getAdapter(id: string): AgentAdapter | undefined {
-  return agentRegistry.getAdapter(id);
 }
 
 export function getAllAdapters(): AgentAdapter[] {
-  return agentRegistry.getAllAdapters();
+  return [...ADAPTERS];
 }
 
-export function getDetectedAdapters(): DetectedAgent[] {
-  return agentRegistry.getDetectedAdapters();
+export function getAdapter(id: string): AgentAdapter | undefined {
+  return ADAPTERS.find((adapter) => adapter.id === id);
+}
+
+export async function detectAll(): Promise<DetectedAgent[]> {
+  const results = await Promise.allSettled(
+    ADAPTERS.map(async (adapter) => {
+      const detected = await adapter.detect();
+      const configPaths = await safeConfigPaths(adapter);
+      return { adapter, detected, configPaths };
+    }),
+  );
+
+  const detectedAgents: DetectedAgent[] = [];
+  for (let index = 0; index < results.length; index += 1) {
+    const result = results[index];
+    const adapter = ADAPTERS[index];
+    if (result.status === 'fulfilled') {
+      detectedAgents.push(result.value);
+      continue;
+    }
+
+    const reason = result.reason;
+    console.warn(
+      `Warning: detect() failed for ${adapter.displayName} (${adapter.id}):`,
+      reason instanceof Error ? reason.message : String(reason),
+    );
+
+    detectedAgents.push({
+      adapter,
+      detected: false,
+      configPaths: await safeConfigPaths(adapter),
+    });
+  }
+
+  return detectedAgents;
+}
+
+export async function getDetectedAdapters(): Promise<AgentAdapter[]> {
+  const detected = await detectAll();
+  return detected.filter((entry) => entry.detected).map((entry) => entry.adapter);
 }

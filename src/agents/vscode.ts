@@ -1,104 +1,77 @@
-import { existsSync } from 'node:fs';
-import * as platform from '../utils/platform.js';
-import * as transformer from '../core/transformer.js';
-import type { ConfigPathInfo, ConfigScope, McpServerSpec, TransportType } from '../types/index.js';
+import path from 'node:path';
+
 import { BaseAdapter } from './base-adapter.js';
+import { ConfigPathInfo, ConfigScope, McpServerSpec } from '../types/index.js';
+import { getPlatform, getVSCodeVariant, fileExists, resolveConfigPath } from '../utils/platform.js';
 
-interface PlatformLike {
-  getVSCodeVariant?: () => string;
+function getVariantGlobalSettingsPath(): string {
+  const variant = getVSCodeVariant();
+  if (getPlatform() === 'macos') {
+    return resolveConfigPath(`~/Library/Application Support/${variant}/User/settings.json`);
+  }
+
+  if (getPlatform() === 'windows') {
+    return resolveConfigPath(`%APPDATA%\\${variant}\\User\\settings.json`);
+  }
+
+  return resolveConfigPath(`~/.config/${variant}/User/settings.json`);
 }
 
-interface TransformerLike {
-  addTypeField?: (
-    config: Record<string, unknown>,
-    transport: TransportType,
-  ) => Record<string, unknown>;
+function getProjectSettingsPath(): string {
+  return path.resolve(process.cwd(), '.vscode', 'mcp.json');
 }
 
-const platformUtils = platform as PlatformLike;
-const transformUtils = transformer as TransformerLike;
+function mapTransport(transport: string): 'stdio' | 'http' {
+  if (transport === 'stdio') {
+    return 'stdio';
+  }
+
+  return 'http';
+}
 
 export class VSCodeAdapter extends BaseAdapter {
   id = 'vscode';
-  displayName = 'VS Code';
-  supportedTransports: TransportType[] = ['stdio', 'http', 'sse'];
-  supportedScopes: ConfigScope[] = ['global', 'project'];
+  displayName = 'Visual Studio Code';
+  supportedTransports = ['stdio', 'http', 'sse'] as const;
+  supportedScopes = ['global', 'project'] as const;
   restartRequired = false;
-  protected rootKey = 'servers';
+  rootKey = 'mcp.servers';
+  detectionCommands = ['code', 'code-insiders', 'codium', 'antigravity'];
 
-  getConfigPaths(): ConfigPathInfo[] {
-    const globalPath = this.getUserSettingsPath();
-    const projectPath = '.vscode/mcp.json';
+  protected getRootKey(scope: ConfigScope): string[] {
+    return scope === 'global' ? ['mcp', 'servers'] : ['servers'];
+  }
+
+  async getConfigPaths(): Promise<ConfigPathInfo[]> {
+    const globalConfig = getVariantGlobalSettingsPath();
+    const projectConfig = getProjectSettingsPath();
 
     return [
       {
-        exists: existsSync(globalPath),
-        path: globalPath,
         scope: 'global',
+        path: globalConfig,
+        exists: await fileExists(globalConfig),
       },
       {
-        exists: existsSync(projectPath),
-        path: projectPath,
         scope: 'project',
+        path: projectConfig,
+        exists: await fileExists(projectConfig),
       },
     ];
   }
 
-  async detect(): Promise<boolean> {
-    try {
-      if (await this.commandExists('code')) {
-        return true;
-      }
-      if (await this.commandExists('code-insiders')) {
-        return true;
-      }
-      if (await this.commandExists('codium')) {
-        return true;
-      }
-      return existsSync(this.getUserSettingsPath());
-    } catch {
-      return false;
-    }
-  }
-
-  transformSpec(spec: McpServerSpec): Record<string, unknown> {
-    const config = this.toBaseServerConfig(spec);
-    const addTypeField = transformUtils.addTypeField;
-
-    if (typeof addTypeField === 'function') {
-      return addTypeField(config, spec.transport);
-    }
-
+  transformSpec(spec: McpServerSpec): Record<string, any> {
     return {
-      ...config,
-      type: spec.transport === 'stdio' ? 'stdio' : 'http',
+      type: mapTransport(spec.transport),
+      ...(spec.command ? { command: spec.command } : null),
+      ...(spec.args ? { args: spec.args } : null),
+      ...(spec.env ? { env: spec.env } : null),
+      ...(spec.url ? { url: spec.url } : null),
+      ...(spec.headers ? { headers: spec.headers } : null),
+      ...(spec.oauth ? { oauth: spec.oauth } : null),
+      ...(spec.disabled !== undefined ? { disabled: spec.disabled } : null),
     };
   }
-
-  protected getRootPath(scope: ConfigScope): Array<string | number> {
-    if (scope === 'global') {
-      return ['mcp.servers'];
-    }
-    return ['servers'];
-  }
-
-  private getVSCodeVariant(): string {
-    if (typeof platformUtils.getVSCodeVariant === 'function') {
-      return platformUtils.getVSCodeVariant();
-    }
-
-    return 'Code';
-  }
-
-  private getUserSettingsPath(): string {
-    const variant = this.getVSCodeVariant();
-
-    if (this.getPlatform() === 'macos') {
-      return this.resolvePath(`~/Library/Application Support/${variant}/User/settings.json`);
-    }
-    if (this.getPlatform() === 'windows') {
-      return this.resolvePath(`%APPDATA%\\${variant}\\User\\settings.json`);
-    }
-    return this.resolvePath(`~/.config/${variant}/User/settings.json`);
-  }
 }
+
+export default VSCodeAdapter;

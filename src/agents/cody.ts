@@ -1,107 +1,94 @@
-import { existsSync } from 'node:fs';
-import { readdir } from 'node:fs/promises';
-import * as platform from '../utils/platform.js';
-import type { ConfigPathInfo, ConfigScope, McpServerSpec, TransportType } from '../types/index.js';
-import { BaseAdapter } from './base-adapter.js';
+import path from 'node:path';
+import { Dirent, promises as fs } from 'node:fs';
 
-interface PlatformLike {
-  getVSCodeVariant?: () => string;
+import { BaseAdapter } from './base-adapter.js';
+import { ConfigPathInfo, McpServerSpec } from '../types/index.js';
+import { resolveConfigPath, getVSCodeVariant, getPlatform, fileExists } from '../utils/platform.js';
+
+function getProjectPath(): string {
+  return path.resolve(process.cwd(), '.vscode', 'settings.json');
 }
 
-const platformUtils = platform as PlatformLike;
+function getGlobalSettingsPath(): string {
+  const variant = getVSCodeVariant();
+  if (getPlatform() === 'macos') {
+    return resolveConfigPath(`~/Library/Application Support/${variant}/User/settings.json`);
+  }
+
+  if (getPlatform() === 'windows') {
+    return resolveConfigPath(`%APPDATA%\\${variant}\\User\\settings.json`);
+  }
+
+  return resolveConfigPath(`~/.config/${variant}/User/settings.json`);
+}
+
+async function hasCodyExtension(roots: string[]): Promise<boolean> {
+  for (const root of roots) {
+    let entries: Dirent[];
+    try {
+      entries = await fs.readdir(root, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+
+    if (entries.some((entry) => entry.isDirectory() && /cody/i.test(entry.name))) {
+      return true;
+    }
+  }
+
+  return false;
+}
 
 export class CodyAdapter extends BaseAdapter {
   id = 'cody';
   displayName = 'Sourcegraph Cody';
-  supportedTransports: TransportType[] = ['stdio'];
-  supportedScopes: ConfigScope[] = ['global', 'project'];
+  supportedTransports = ['stdio'] as const;
+  supportedScopes = ['global', 'project'] as const;
   restartRequired = false;
-  protected rootKey = 'mcpServers';
-
-  getConfigPaths(): ConfigPathInfo[] {
-    const globalPath = this.getUserSettingsPath();
-    const projectPath = '.vscode/settings.json';
-
-    return [
-      {
-        exists: existsSync(globalPath),
-        path: globalPath,
-        scope: 'global',
-      },
-      {
-        exists: existsSync(projectPath),
-        path: projectPath,
-        scope: 'project',
-      },
-    ];
-  }
+  rootKey = ['cody', 'mcpServers'];
+  detectionCommands = ['cody'];
 
   async detect(): Promise<boolean> {
-    try {
-      for (const extensionsDir of this.getExtensionDirectories()) {
-        if (!(await this.directoryExists(extensionsDir))) {
-          continue;
-        }
-
-        const entries = await readdir(extensionsDir, { withFileTypes: true });
-        const codyInstalled = entries.some(
-          (entry) =>
-            entry.isDirectory() &&
-            entry.name.toLowerCase().startsWith('sourcegraph.cody-ai'),
-        );
-
-        if (codyInstalled) {
-          return true;
-        }
-      }
-
-      return false;
-    } catch {
-      return false;
-    }
-  }
-
-  transformSpec(spec: McpServerSpec): Record<string, unknown> {
-    return this.toBaseServerConfig(spec);
-  }
-
-  protected getRootPath(_scope: ConfigScope): Array<string | number> {
-    return ['cody', 'mcpServers'];
-  }
-
-  private getVSCodeVariant(): string {
-    if (typeof platformUtils.getVSCodeVariant === 'function') {
-      return platformUtils.getVSCodeVariant();
+    const baseDetected = await super.detect();
+    if (baseDetected) {
+      return true;
     }
 
-    return 'Code';
+    const extensionRoots = [
+      resolveConfigPath('~/.vscode/extensions'),
+      resolveConfigPath('%USERPROFILE%\\.vscode\\extensions'),
+    ];
+
+    return hasCodyExtension(extensionRoots);
   }
 
-  private getUserSettingsPath(): string {
-    const variant = this.getVSCodeVariant();
-
-    if (this.getPlatform() === 'macos') {
-      return this.resolvePath(`~/Library/Application Support/${variant}/User/settings.json`);
-    }
-    if (this.getPlatform() === 'windows') {
-      return this.resolvePath(`%APPDATA%\\${variant}\\User\\settings.json`);
-    }
-    return this.resolvePath(`~/.config/${variant}/User/settings.json`);
-  }
-
-  private getExtensionDirectories(): string[] {
-    if (this.getPlatform() === 'windows') {
-      return [
-        this.resolvePath('%USERPROFILE%\\.vscode\\extensions'),
-        this.resolvePath('%USERPROFILE%\\.vscode-insiders\\extensions'),
-        this.resolvePath('%USERPROFILE%\\.vscode-oss\\extensions'),
-      ];
-    }
+  async getConfigPaths(): Promise<ConfigPathInfo[]> {
+    const globalConfig = getGlobalSettingsPath();
+    const projectConfig = getProjectPath();
 
     return [
-      this.resolvePath('~/.vscode/extensions'),
-      this.resolvePath('~/.vscode-insiders/extensions'),
-      this.resolvePath('~/.vscode-oss/extensions'),
+      {
+        scope: 'global',
+        path: globalConfig,
+        exists: await fileExists(globalConfig),
+      },
+      {
+        scope: 'project',
+        path: projectConfig,
+        exists: await fileExists(projectConfig),
+      },
     ];
   }
+
+  transformSpec(spec: McpServerSpec): Record<string, any> {
+    return {
+      ...(spec.command ? { command: spec.command } : null),
+      ...(spec.args ? { args: spec.args } : null),
+      ...(spec.env ? { env: spec.env } : null),
+      ...(spec.oauth ? { oauth: spec.oauth } : null),
+      ...(spec.disabled !== undefined ? { disabled: spec.disabled } : null),
+    };
+  }
 }
+
+export default CodyAdapter;

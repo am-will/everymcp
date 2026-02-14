@@ -1,52 +1,67 @@
-import { existsSync } from 'node:fs';
-
-import type { ConfigPathInfo, ConfigScope, McpServerSpec, TransportType } from '../types/index.js';
-import { commandExists, resolveConfigPath } from '../utils/platform.js';
 import { BaseAdapter } from './base-adapter.js';
+import type { ConfigPathInfo, McpServerSpec } from '../types/index.js';
+import { commandExists, fileExists, resolveConfigPath } from '../utils/platform.js';
+
+const CONFIG_PATH = resolveConfigPath('~/.gemini/settings.json');
+
+function buildServerConfig(spec: McpServerSpec): Record<string, unknown> {
+  const serverConfig: Record<string, unknown> = {};
+
+  if (spec.command) {
+    serverConfig.command = spec.command;
+  }
+
+  if (spec.args && spec.args.length > 0) {
+    serverConfig.args = spec.args;
+  }
+
+  if (spec.url) {
+    serverConfig.url = spec.url;
+  }
+
+  if (spec.headers) {
+    serverConfig.headers = spec.headers;
+  }
+
+  if (spec.env) {
+    serverConfig.env = spec.env;
+  }
+
+  if (spec.oauth) {
+    serverConfig.oauth = spec.oauth;
+  }
+
+  return serverConfig;
+}
 
 export class GeminiCliAdapter extends BaseAdapter {
   id = 'gemini-cli';
   displayName = 'Gemini CLI';
-  supportedTransports: TransportType[] = ['stdio', 'sse'];
-  supportedScopes: ConfigScope[] = ['global'];
+  supportedTransports = ['stdio', 'sse'] as const;
+  supportedScopes = ['global'] as const;
   restartRequired = false;
+  rootKey = 'mcpServers';
 
-  getConfigPaths(): ConfigPathInfo[] {
-    const globalPath = resolveConfigPath('~/.gemini/settings.json');
-
+  async getConfigPaths(): Promise<ConfigPathInfo[]> {
     return [
       {
         scope: 'global',
-        path: globalPath,
-        exists: existsSync(globalPath),
+        path: CONFIG_PATH,
+        exists: await fileExists(CONFIG_PATH),
       },
     ];
   }
 
   async detect(): Promise<boolean> {
-    return commandExists('gemini');
+    try {
+      return commandExists('gemini');
+    } catch {
+      return false;
+    }
   }
 
-  transformSpec(spec: McpServerSpec): Record<string, any> {
-    const transformed: Record<string, unknown> =
-      spec.transport === 'stdio'
-        ? {
-            command: spec.command ?? '',
-            args: spec.args ?? [],
-          }
-        : {
-            url: spec.url ?? '',
-          };
-
-    if (spec.env && Object.keys(spec.env).length > 0) {
-      transformed.env = { ...spec.env };
-    }
-
-    if (spec.transport === 'sse' && spec.headers && Object.keys(spec.headers).length > 0) {
-      transformed.headers = { ...spec.headers };
-    }
-
-    return transformed;
+  transformSpec(spec: McpServerSpec): Record<string, unknown> {
+    return buildServerConfig(spec);
   }
 }
 

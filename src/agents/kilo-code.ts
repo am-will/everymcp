@@ -1,120 +1,158 @@
-import { existsSync } from 'node:fs';
-import { readdir } from 'node:fs/promises';
 import path from 'node:path';
-
-import type { ConfigPathInfo, ConfigScope, McpServerSpec, TransportType } from '../types/index.js';
+import { existsSync, readdirSync } from 'node:fs';
+import { BaseAdapter } from './base-adapter.js';
+import type { ConfigPathInfo, McpServerSpec } from '../types/index.js';
 import {
   directoryExists,
   getPlatform,
   getVSCodeVariant,
+  fileExists,
   resolveConfigPath,
 } from '../utils/platform.js';
-import { BaseAdapter } from './base-adapter.js';
 
-const KILO_EXTENSION_ID = 'kilocode.kilo-code';
+const EXTENSION_ID = 'kilocode.kilo-code';
+const CONFIG_FILE = 'mcp_settings.json';
 
-function getKiloGlobalConfigPath(): string {
+function getPathBase(): string {
   const variant = getVSCodeVariant();
-  const platform = getPlatform();
 
-  if (platform === 'macos') {
+  if (getPlatform() === 'windows') {
+    return resolveConfigPath(path.join('%APPDATA%', variant, 'User', 'globalStorage', EXTENSION_ID));
+  }
+
+  if (getPlatform() === 'macos') {
     return resolveConfigPath(
-      `~/Library/Application Support/${variant}/User/globalStorage/${KILO_EXTENSION_ID}/settings/mcp_settings.json`,
+      path.join('~/Library/Application Support', variant, 'User', 'globalStorage', EXTENSION_ID),
     );
   }
 
-  if (platform === 'windows') {
-    return resolveConfigPath(
-      `%APPDATA%/${variant}/User/globalStorage/${KILO_EXTENSION_ID}/settings/mcp_settings.json`,
-    );
-  }
-
-  return resolveConfigPath(
-    `~/.config/${variant}/User/globalStorage/${KILO_EXTENSION_ID}/settings/mcp_settings.json`,
-  );
+  return resolveConfigPath(path.join('~/.config', variant, 'User', 'globalStorage', EXTENSION_ID));
 }
 
-async function isKiloExtensionInstalled(): Promise<boolean> {
-  const extensionDirs = [
-    resolveConfigPath('~/.vscode/extensions'),
-    resolveConfigPath('~/.vscode-insiders/extensions'),
-    resolveConfigPath('~/.vscodium/extensions'),
-  ];
-
-  for (const extensionDir of extensionDirs) {
-    if (!(await directoryExists(extensionDir))) {
-      continue;
-    }
-
-    try {
-      const installed = await readdir(extensionDir);
-      if (installed.some((entry) => entry.toLowerCase().includes('kilocode'))) {
-        return true;
-      }
-    } catch {
-      // Ignore and keep probing other extension locations.
-    }
+function getConfigPath(scope: 'global' | 'project'): string {
+  if (scope === 'project') {
+    return resolveConfigPath('.kilocode/mcp.json');
   }
 
-  return false;
+  return path.join(getPathBase(), 'settings', CONFIG_FILE);
+}
+
+function getExtensionRoots(): string[] {
+  if (getPlatform() === 'windows') {
+    return [
+      resolveConfigPath('%APPDATA%\\Code\\User\\globalStorage'),
+      resolveConfigPath('%APPDATA%\\Code - Insiders\\User\\globalStorage'),
+      resolveConfigPath('%APPDATA%\\VSCodium\\User\\globalStorage'),
+      resolveConfigPath('%APPDATA%\\Antigravity\\User\\globalStorage'),
+    ];
+  }
+
+  if (getPlatform() === 'macos') {
+    return [
+      resolveConfigPath('~/Library/Application Support/Code/User/globalStorage'),
+      resolveConfigPath('~/Library/Application Support/Code - Insiders/User/globalStorage'),
+      resolveConfigPath('~/Library/Application Support/VSCodium/User/globalStorage'),
+      resolveConfigPath('~/Library/Application Support/Antigravity/User/globalStorage'),
+    ];
+  }
+
+  return [
+    resolveConfigPath('~/.config/Code/User/globalStorage'),
+    resolveConfigPath('~/.config/Code - Insiders/User/globalStorage'),
+    resolveConfigPath('~/.config/VSCodium/User/globalStorage'),
+    resolveConfigPath('~/.config/Antigravity/User/globalStorage'),
+    resolveConfigPath('~/.vscode/extensions'),
+    resolveConfigPath('~/.vscode-insiders/extensions'),
+    resolveConfigPath('~/.vscode-oss/extensions'),
+  ];
+}
+
+function hasInstalledExtensionDirectory(root: string): boolean {
+  if (!existsSync(root)) {
+    return false;
+  }
+
+  const directInstallPath = path.join(root, EXTENSION_ID);
+  if (existsSync(directInstallPath)) {
+    return true;
+  }
+
+  try {
+    const entries = readdirSync(root, { withFileTypes: true });
+    return entries.some((entry) => entry.isDirectory() && entry.name.startsWith(EXTENSION_ID));
+  } catch {
+    return false;
+  }
+}
+
+function buildServerConfig(spec: McpServerSpec): Record<string, unknown> {
+  const serverConfig: Record<string, unknown> = {};
+
+  if (spec.command) {
+    serverConfig.command = spec.command;
+  }
+
+  if (spec.args && spec.args.length > 0) {
+    serverConfig.args = spec.args;
+  }
+
+  if (spec.url) {
+    serverConfig.url = spec.url;
+  }
+
+  if (spec.headers) {
+    serverConfig.headers = spec.headers;
+  }
+
+  if (spec.env) {
+    serverConfig.env = spec.env;
+  }
+
+  if (spec.oauth) {
+    serverConfig.oauth = spec.oauth;
+  }
+
+  return serverConfig;
 }
 
 export class KiloCodeAdapter extends BaseAdapter {
   id = 'kilo-code';
   displayName = 'Kilo Code';
-  supportedTransports: TransportType[] = ['stdio', 'http'];
-  supportedScopes: ConfigScope[] = ['global', 'project'];
+  supportedTransports = ['stdio', 'http'] as const;
+  supportedScopes = ['global', 'project'] as const;
   restartRequired = false;
+  rootKey = 'mcpServers';
 
-  getConfigPaths(): ConfigPathInfo[] {
-    const globalPath = getKiloGlobalConfigPath();
-    const projectPath = resolveConfigPath('.kilocode/mcp.json');
-
+  async getConfigPaths(): Promise<ConfigPathInfo[]> {
     return [
       {
         scope: 'global',
-        path: globalPath,
-        exists: existsSync(globalPath),
+        path: getConfigPath('global'),
+        exists: await fileExists(getConfigPath('global')),
       },
       {
         scope: 'project',
-        path: projectPath,
-        exists: existsSync(projectPath),
+        path: getConfigPath('project'),
+        exists: await fileExists(getConfigPath('project')),
       },
     ];
   }
 
   async detect(): Promise<boolean> {
-    const globalConfigPath = getKiloGlobalConfigPath();
-    const globalStorageDir = path.dirname(path.dirname(globalConfigPath));
-    const [hasExtension, hasConfigDir] = await Promise.all([
-      isKiloExtensionInstalled(),
-      directoryExists(globalStorageDir),
-    ]);
+    try {
+      const extensionRoots = getExtensionRoots();
+      const installed = extensionRoots.some((root) => hasInstalledExtensionDirectory(root));
+      const globalConfigRoot = path.dirname(getConfigPath('global'));
+      const configured = await directoryExists(globalConfigRoot);
 
-    return hasExtension || hasConfigDir;
+      return installed || configured;
+    } catch {
+      return false;
+    }
   }
 
-  transformSpec(spec: McpServerSpec): Record<string, any> {
-    const transformed: Record<string, unknown> =
-      spec.transport === 'stdio'
-        ? {
-            command: spec.command ?? '',
-            args: spec.args ?? [],
-          }
-        : {
-            url: spec.url ?? '',
-          };
-
-    if (spec.env && Object.keys(spec.env).length > 0) {
-      transformed.env = { ...spec.env };
-    }
-
-    if (spec.transport === 'http' && spec.headers && Object.keys(spec.headers).length > 0) {
-      transformed.headers = { ...spec.headers };
-    }
-
-    return transformed;
+  transformSpec(spec: McpServerSpec): Record<string, unknown> {
+    return buildServerConfig(spec);
   }
 }
 

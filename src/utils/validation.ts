@@ -1,257 +1,198 @@
+import { commandExists } from './platform.js';
+
 export type ParsedServerInput =
-  | {
-      kind: 'url';
-      transport: 'http' | 'sse';
-      url: string;
-      raw: string;
+  | { kind: 'url'; transport: 'http' | 'sse'; value: string }
+  | { kind: 'command'; command: string; args: string[] }
+  | { kind: 'registry'; name: string };
+
+function isQuotedCommandInput(input: string): boolean {
+  return input.startsWith('"') || input.startsWith('\'');
+}
+
+function parseQuotedCommand(input: string): string[] {
+  const trimmed = input.trim();
+  if (!trimmed) {
+    return [];
+  }
+
+  const args: string[] = [];
+  let token = '';
+  let tokenStarted = false;
+  let quote: null | 'single' | 'double' = null;
+
+  const pushToken = () => {
+    if (tokenStarted) {
+      args.push(token);
     }
-  | {
-      kind: 'command';
-      transport: 'stdio';
-      command: string;
-      args: string[];
-      raw: string;
+    token = '';
+    tokenStarted = false;
+  };
+
+  for (let index = 0; index < trimmed.length; index += 1) {
+    const current = trimmed[index];
+    const next = trimmed[index + 1];
+
+    if (quote === null) {
+      if (current === ' ' || current === '\t' || current === '\n' || current === '\r') {
+        pushToken();
+        continue;
+      }
+      if (current === '"') {
+        quote = 'double';
+        tokenStarted = true;
+        continue;
+      }
+      if (current === '\'') {
+        quote = 'single';
+        tokenStarted = true;
+        continue;
+      }
+      if (current === '\\' && next !== undefined) {
+        if (next === ' ' || next === '\t' || next === '"' || next === '\'' || next === '\\') {
+          token += next;
+          tokenStarted = true;
+          index += 1;
+          continue;
+        }
+      }
+      token += current;
+      tokenStarted = true;
+      continue;
     }
-  | {
-      kind: 'registry';
-      name: string;
-      raw: string;
-    };
 
-const ENV_KEY_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
-const HEADER_KEY_PATTERN = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
-const URL_PROTOCOLS = new Set(['http:', 'https:', 'sse:']);
+    if (quote === 'single') {
+      if (current === '\'') {
+        quote = null;
+        continue;
+      }
+      token += current;
+      continue;
+    }
 
-const KNOWN_COMMANDS = new Set([
-  'bash',
-  'bun',
-  'cmd',
-  'deno',
-  'node',
-  'npm',
-  'npx',
-  'pnpm',
-  'powershell',
-  'pwsh',
-  'python',
-  'python3',
-  'sh',
-  'uv',
-  'uvx',
-  'yarn',
-]);
+    if (quote === 'double') {
+      if (current === '\\' && next !== undefined) {
+        if (next === '\\' || next === '"' || next === '$' || next === '`') {
+          token += next;
+          index += 1;
+          continue;
+        }
+      }
+      if (current === '"') {
+        quote = null;
+        continue;
+      }
+      token += current;
+      continue;
+    }
+  }
 
-export function validateUrl(input: string): boolean {
+  if (quote !== null) {
+    throw new Error('unterminated quote in command input');
+  }
+
+  pushToken();
+  return args;
+}
+
+function inferTransport(url: string): 'http' | 'sse' {
   try {
-    const parsed = new URL(input);
-    return URL_PROTOCOLS.has(parsed.protocol);
+    const parsed = new URL(url);
+    const transport = parsed.searchParams.get('transport')?.toLowerCase();
+    if (transport === 'sse') {
+      return 'sse';
+    }
+    if (parsed.pathname.endsWith('/sse') || parsed.pathname === '/sse') {
+      return 'sse';
+    }
+    return 'http';
+  } catch {
+    return 'http';
+  }
+}
+
+function isLikelyRegistryName(value: string): boolean {
+  if (value.includes('\\') || value.includes(':')) {
+    return false;
+  }
+  if (value.startsWith('@')) {
+    return /^@[^@/\s]+\/[A-Za-z0-9._-]+$/.test(value);
+  }
+  if (value.includes('/')) {
+    return false;
+  }
+
+  return /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(value);
+}
+
+export function parseServerInput(input: string): ParsedServerInput {
+  const trimmed = input.trim();
+  if (!trimmed) {
+    throw new Error('Empty server input');
+  }
+
+  if (validateUrl(trimmed)) {
+    return {
+      kind: 'url',
+      transport: inferTransport(trimmed),
+      value: trimmed,
+    };
+  }
+
+  const tokens = parseQuotedCommand(trimmed);
+  if (tokens.length === 0) {
+    throw new Error(`Invalid server input: "${input}"`);
+  }
+
+  const [commandOrName, ...args] = tokens;
+  if (
+    tokens.length === 1 &&
+    !isQuotedCommandInput(trimmed) &&
+    isLikelyRegistryName(commandOrName) &&
+    !commandExists(commandOrName)
+  ) {
+    return { kind: 'registry', name: commandOrName };
+  }
+
+  return { kind: 'command', command: commandOrName, args };
+}
+
+export function validateUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === 'http:' || parsed.protocol === 'https:';
   } catch {
     return false;
   }
 }
 
-function inferTransportFromUrl(parsed: URL): 'http' | 'sse' {
-  if (parsed.protocol === 'sse:') {
-    return 'sse';
-  }
-
-  const pathName = parsed.pathname.toLowerCase();
-  const transport = parsed.searchParams.get('transport')?.toLowerCase();
-  const type = parsed.searchParams.get('type')?.toLowerCase();
-
-  if (transport === 'sse' || type === 'sse') {
-    return 'sse';
-  }
-
-  if (pathName.endsWith('/sse') || pathName.includes('/events')) {
-    return 'sse';
-  }
-
-  return 'http';
-}
-
-function parseCommandTokens(input: string): string[] {
-  const tokens: string[] = [];
-  let current = '';
-  let quote: '"' | "'" | null = null;
-
-  for (let i = 0; i < input.length; i += 1) {
-    const char = input[i];
-
-    if (char === '\\' && quote !== "'") {
-      const next = input[i + 1];
-      if (next !== undefined) {
-        current += next;
-        i += 1;
-        continue;
-      }
-    }
-
-    if ((char === '"' || char === "'") && quote === null) {
-      quote = char;
-      continue;
-    }
-
-    if (quote === char) {
-      quote = null;
-      continue;
-    }
-
-    if (/\s/.test(char) && quote === null) {
-      if (current.length > 0) {
-        tokens.push(current);
-        current = '';
-      }
-      continue;
-    }
-
-    current += char;
-  }
-
-  if (quote !== null) {
-    throw new Error('Unterminated quote in command input.');
-  }
-
-  if (current.length > 0) {
-    tokens.push(current);
-  }
-
-  return tokens;
-}
-
-function isPathLike(value: string): boolean {
-  if (!value) {
-    return false;
-  }
-
-  return (
-    value.startsWith('/') ||
-    value.startsWith('./') ||
-    value.startsWith('../') ||
-    value.startsWith('~/') ||
-    value.startsWith('.\\') ||
-    value.startsWith('..\\') ||
-    /^[A-Za-z]:\\/.test(value) ||
-    value.includes('\\')
-  );
-}
-
-function looksLikeCommand(raw: string, tokens: string[]): boolean {
-  if (tokens.length > 1) {
-    return true;
-  }
-
-  const token = tokens[0];
-  if (!token) {
-    return false;
-  }
-
-  if (KNOWN_COMMANDS.has(token.toLowerCase())) {
-    return true;
-  }
-
-  if (isPathLike(token)) {
-    return true;
-  }
-
-  if (/\.(cmd|bat|exe|sh|ps1|js|mjs|cjs|ts)$/i.test(token)) {
-    return true;
-  }
-
-  if (raw.startsWith('-')) {
-    return true;
-  }
-
-  return false;
-}
-
-function isRegistryName(value: string): boolean {
-  return /^[A-Za-z0-9][A-Za-z0-9._@/-]*$/.test(value);
-}
-
-export function parseServerInput(input: string): ParsedServerInput {
-  const raw = input.trim();
-  if (!raw) {
-    throw new Error('Server input is required.');
-  }
-
-  if (validateUrl(raw)) {
-    const parsed = new URL(raw);
-    return {
-      kind: 'url',
-      transport: inferTransportFromUrl(parsed),
-      url: parsed.toString(),
-      raw,
-    };
-  }
-
-  const tokens = parseCommandTokens(raw);
-  if (tokens.length === 0) {
-    throw new Error('Server input is required.');
-  }
-
-  if (looksLikeCommand(raw, tokens)) {
-    return {
-      kind: 'command',
-      transport: 'stdio',
-      command: tokens[0],
-      args: tokens.slice(1),
-      raw,
-    };
-  }
-
-  if (tokens.length === 1 && isRegistryName(tokens[0])) {
-    return {
-      kind: 'registry',
-      name: tokens[0],
-      raw,
-    };
-  }
-
-  return {
-    kind: 'command',
-    transport: 'stdio',
-    command: tokens[0],
-    args: tokens.slice(1),
-    raw,
-  };
-}
-
-function parseKeyValuePairs(
+function parseKeyValueList(
   values: string[],
-  label: string,
-  keyPattern: RegExp,
+  label: 'environment variable' | 'header',
 ): Record<string, string> {
-  const parsed: Record<string, string> = {};
-
-  for (const value of values) {
-    const raw = value.trim();
-    if (!raw) {
-      continue;
+  const result: Record<string, string> = {};
+  for (const entry of values) {
+    const index = entry.indexOf('=');
+    if (index === -1) {
+      throw new Error(`Invalid ${label} entry "${entry}". Expected KEY=VALUE.`);
     }
 
-    const separatorIndex = raw.indexOf('=');
-    if (separatorIndex <= 0) {
-      throw new Error(`Invalid ${label} "${value}". Expected KEY=VALUE format.`);
+    const key = entry.slice(0, index).trim();
+    if (!key) {
+      throw new Error(`Invalid ${label} entry "${entry}". Key cannot be empty.`);
     }
-
-    const key = raw.slice(0, separatorIndex).trim();
-    const parsedValue = raw.slice(separatorIndex + 1).trim();
-
-    if (!keyPattern.test(key)) {
-      throw new Error(`Invalid ${label} key "${key}".`);
+    if (/\s/.test(key)) {
+      throw new Error(`Invalid ${label} entry "${entry}". Key cannot contain whitespace.`);
     }
-
-    parsed[key] = parsedValue;
+    const value = entry.slice(index + 1);
+    result[key] = value;
   }
-
-  return parsed;
+  return result;
 }
 
 export function validateEnvVars(vars: string[]): Record<string, string> {
-  return parseKeyValuePairs(vars, 'environment variable', ENV_KEY_PATTERN);
+  return parseKeyValueList(vars, 'environment variable');
 }
 
 export function validateHeaders(headers: string[]): Record<string, string> {
-  return parseKeyValuePairs(headers, 'header', HEADER_KEY_PATTERN);
+  return parseKeyValueList(headers, 'header');
 }

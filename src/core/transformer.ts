@@ -1,112 +1,74 @@
-import type { McpServerSpec, TransportType } from './server-spec.js';
+import { McpServerSpec, TransportType } from './server-spec.js';
 
-type JsonValue = string | number | boolean | null | JsonValue[] | JsonRecord;
-interface JsonRecord {
-  [key: string]: JsonValue;
+const WINDOWS_NPX_PATH = 'C:\\Program Files\\nodejs\\npx.cmd';
+
+function isWindowsRuntime(): boolean {
+  const processPlatform = (globalThis as unknown as { process?: { platform?: string } }).process?.platform;
+  return processPlatform === 'win32';
 }
 
-const DEFAULT_WINDOWS_NPX_PATH = 'C:\\Program Files\\nodejs\\npx.cmd';
+function resolveNpxPath(command: string): string {
+  const base = command.split(/[\\/]/).pop() ?? command;
+  return /^npx(?:\.cmd)?$/i.test(base) ? WINDOWS_NPX_PATH : command;
+}
 
-export function addTypeField<T extends JsonRecord>(
-  config: T,
-  transport: TransportType
-): T & { type: 'stdio' | 'http' } {
+export function addTypeField(config: Record<string, any>, transport: TransportType): Record<string, any> {
   return {
     ...config,
     type: transport === 'stdio' ? 'stdio' : 'http',
   };
 }
 
-export function addWindsurfFields<T extends JsonRecord>(
-  config: T
-): Omit<T, 'url'> & { serverUrl?: JsonValue; disabled: boolean; alwaysAllow: JsonValue[] } {
-  const transformed: JsonRecord = { ...config };
+export function addWindsurfFields(config: Record<string, any>): Record<string, any> {
+  const serverUrl = config.url;
+  const next = { ...config };
 
-  if ('url' in transformed && !('serverUrl' in transformed)) {
-    transformed.serverUrl = transformed.url;
-    delete transformed.url;
+  if (serverUrl && !next.serverUrl) {
+    next.serverUrl = serverUrl;
+    delete next.url;
   }
 
-  if (!('disabled' in transformed)) {
-    transformed.disabled = false;
+  if (next.disabled === undefined) {
+    next.disabled = false;
   }
 
-  if (!('alwaysAllow' in transformed)) {
-    transformed.alwaysAllow = [];
+  if (next.alwaysAllow === undefined) {
+    next.alwaysAllow = [];
   }
 
-  return transformed as Omit<T, 'url'> & {
-    serverUrl?: JsonValue;
-    disabled: boolean;
-    alwaysAllow: JsonValue[];
-  };
+  return next;
 }
 
-export function addZedFields<T extends JsonRecord>(config: T): T & { source: 'custom' } {
+export function addZedFields(config: Record<string, any>): Record<string, any> {
   return {
     ...config,
-    source: 'custom',
+    source: config.source ?? 'custom',
   };
 }
 
-export function addExtraDefaults<T extends JsonRecord>(
-  config: T,
-  fields: Record<string, JsonValue>
-): T & Record<string, JsonValue> {
-  const transformed: JsonRecord = { ...config };
-
-  for (const [key, value] of Object.entries(fields)) {
-    if (transformed[key] === undefined) {
-      transformed[key] = value;
-    }
-  }
-
-  return transformed as T & Record<string, JsonValue>;
-}
-
-export function wrapStdioForClaudeDesktopWindows(
-  spec: McpServerSpec,
-  platform: NodeJS.Platform = process.platform
-): McpServerSpec {
-  if (platform !== 'win32' || spec.transport !== 'stdio' || !spec.command) {
-    return cloneSpec(spec);
-  }
-
-  const existingArgs = Array.isArray(spec.args) ? [...spec.args] : [];
-  if (spec.command.toLowerCase() === 'cmd' && existingArgs[0]?.toLowerCase() === '/c') {
-    return {
-      ...cloneSpec(spec),
-      args: existingArgs,
-    };
-  }
-
-  const resolvedCommand = resolveWindowsCommand(spec.command);
+export function addExtraDefaults(config: Record<string, any>, fields: Record<string, any>): Record<string, any> {
   return {
-    ...cloneSpec(spec),
-    command: 'cmd',
-    args: ['/c', resolvedCommand, ...existingArgs],
+    ...fields,
+    ...Object.fromEntries(
+      Object.entries(config).filter(([, value]) => value !== undefined),
+    ),
   };
 }
 
-function resolveWindowsCommand(command: string): string {
-  const lower = command.trim().toLowerCase();
-  if (lower === 'npx' || lower.endsWith('\\npx') || lower.endsWith('/npx')) {
-    return DEFAULT_WINDOWS_NPX_PATH;
+export function wrapStdioForClaudeDesktopWindows(spec: McpServerSpec): McpServerSpec {
+  if (!isWindowsRuntime() || spec.transport !== 'stdio' || !spec.command) {
+    return spec;
   }
 
-  if (lower.endsWith('\\npx.cmd') || lower.endsWith('/npx.cmd')) {
-    return command;
+  const existingCommand = spec.command;
+  if (existingCommand.toLowerCase() === 'cmd' && spec.args?.[0] === '/c') {
+    return spec;
   }
 
-  return command;
-}
-
-function cloneSpec(spec: McpServerSpec): McpServerSpec {
+  const resolvedCommand = resolveNpxPath(existingCommand);
   return {
     ...spec,
-    args: spec.args ? [...spec.args] : spec.args,
-    headers: spec.headers ? { ...spec.headers } : spec.headers,
-    env: spec.env ? { ...spec.env } : spec.env,
-    oauth: spec.oauth ? { ...spec.oauth } : spec.oauth,
+    command: 'cmd',
+    args: ['/c', resolvedCommand, ...(spec.args ?? [])],
   };
 }

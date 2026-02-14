@@ -1,87 +1,100 @@
-import { existsSync } from 'node:fs';
 import path from 'node:path';
-
-import { addExtraDefaults } from '../core/transformer.js';
-import type { ConfigPathInfo, ConfigScope, McpServerSpec, TransportType } from '../types/index.js';
+import { BaseAdapter } from './base-adapter.js';
+import type { ConfigPathInfo, McpServerSpec } from '../types/index.js';
 import {
   directoryExists,
   getPlatform,
   getVSCodeVariant,
+  fileExists,
   resolveConfigPath,
 } from '../utils/platform.js';
-import { BaseAdapter } from './base-adapter.js';
 
-const CLINE_EXTENSION_ID = 'saoudrizwan.claude-dev';
+const EXTENSION_ID = 'saoudrizwan.claude-dev';
+const CONFIG_FILE = 'cline_mcp_settings.json';
 
-function getClineGlobalConfigPath(): string {
+function getPathBase(): string {
   const variant = getVSCodeVariant();
-  const platform = getPlatform();
 
-  if (platform === 'macos') {
+  if (getPlatform() === 'windows') {
+    return resolveConfigPath(path.join('%APPDATA%', variant, 'User', 'globalStorage', EXTENSION_ID));
+  }
+
+  if (getPlatform() === 'macos') {
     return resolveConfigPath(
-      `~/Library/Application Support/${variant}/User/globalStorage/${CLINE_EXTENSION_ID}/settings/cline_mcp_settings.json`,
+      path.join('~/Library/Application Support', variant, 'User', 'globalStorage', EXTENSION_ID),
     );
   }
 
-  if (platform === 'windows') {
-    return resolveConfigPath(
-      `%APPDATA%/${variant}/User/globalStorage/${CLINE_EXTENSION_ID}/settings/cline_mcp_settings.json`,
-    );
+  return resolveConfigPath(path.join('~/.config', variant, 'User', 'globalStorage', EXTENSION_ID));
+}
+
+function getConfigPath(): string {
+  return path.join(getPathBase(), 'settings', CONFIG_FILE);
+}
+
+function buildServerConfig(spec: McpServerSpec): Record<string, unknown> {
+  const serverConfig: Record<string, unknown> = {
+    alwaysAllow: [],
+    disabled: false,
+  };
+
+  if (spec.command) {
+    serverConfig.command = spec.command;
   }
 
-  return resolveConfigPath(
-    `~/.config/${variant}/User/globalStorage/${CLINE_EXTENSION_ID}/settings/cline_mcp_settings.json`,
-  );
+  if (spec.args && spec.args.length > 0) {
+    serverConfig.args = spec.args;
+  }
+
+  if (spec.url) {
+    serverConfig.url = spec.url;
+  }
+
+  if (spec.headers) {
+    serverConfig.headers = spec.headers;
+  }
+
+  if (spec.env) {
+    serverConfig.env = spec.env;
+  }
+
+  if (spec.oauth) {
+    serverConfig.oauth = spec.oauth;
+  }
+
+  return serverConfig;
 }
 
 export class ClineAdapter extends BaseAdapter {
   id = 'cline';
   displayName = 'Cline';
-  supportedTransports: TransportType[] = ['stdio', 'http', 'sse'];
-  supportedScopes: ConfigScope[] = ['global'];
+  supportedTransports = ['stdio', 'http', 'sse'] as const;
+  supportedScopes = ['global'] as const;
   restartRequired = false;
+  rootKey = 'mcpServers';
 
-  getConfigPaths(): ConfigPathInfo[] {
-    const globalPath = getClineGlobalConfigPath();
-
+  async getConfigPaths(): Promise<ConfigPathInfo[]> {
+    const configPath = getConfigPath();
     return [
       {
         scope: 'global',
-        path: globalPath,
-        exists: existsSync(globalPath),
+        path: configPath,
+        exists: await fileExists(configPath),
       },
     ];
   }
 
   async detect(): Promise<boolean> {
-    const configPath = getClineGlobalConfigPath();
-    const globalStorageDir = path.dirname(path.dirname(configPath));
-    return directoryExists(globalStorageDir);
+    try {
+      const globalStoragePath = path.join(getPathBase(), 'settings');
+      return directoryExists(globalStoragePath);
+    } catch {
+      return false;
+    }
   }
 
-  transformSpec(spec: McpServerSpec): Record<string, any> {
-    const transformed: Record<string, any> =
-      spec.transport === 'stdio'
-        ? {
-            command: spec.command ?? '',
-            args: spec.args ?? [],
-          }
-        : {
-            url: spec.url ?? '',
-          };
-
-    if (spec.env && Object.keys(spec.env).length > 0) {
-      transformed.env = { ...spec.env };
-    }
-
-    if (spec.transport !== 'stdio' && spec.headers && Object.keys(spec.headers).length > 0) {
-      transformed.headers = { ...spec.headers };
-    }
-
-    return addExtraDefaults(transformed, {
-      alwaysAllow: [],
-      disabled: spec.disabled ?? false,
-    });
+  transformSpec(spec: McpServerSpec): Record<string, unknown> {
+    return buildServerConfig(spec);
   }
 }
 

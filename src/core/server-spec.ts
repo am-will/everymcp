@@ -1,5 +1,3 @@
-import { basename } from 'node:path';
-
 export type TransportType = 'stdio' | 'http' | 'sse';
 
 export interface McpServerSpec {
@@ -17,369 +15,235 @@ export interface McpServerSpec {
   disabled?: boolean;
 }
 
-export interface ParseServerSpecOverrides {
+export interface ServerSpecOverrides {
   name?: string;
-  env?: string[] | Record<string, string>;
-  headers?: string[] | Record<string, string>;
-  header?: string[] | Record<string, string>;
+  env?: string[];
+  header?: string[];
+  headers?: string[];
   authToken?: string;
   oauthClientId?: string;
-  oauthCallbackPort?: number;
-  transport?: TransportType | string;
-  disabled?: boolean;
+  transport?: TransportType;
 }
 
-interface ParsedCommand {
-  command: string;
-  args: string[];
+function normalizeTransport(value?: string): TransportType | undefined {
+  if (!value) {
+    return undefined;
+  }
+  if (value === 'stdio' || value === 'http' || value === 'sse') {
+    return value;
+  }
+  throw new Error(`Invalid transport override: ${value}`);
 }
 
-const REMOTE_PROTOCOLS = new Set(['http:', 'https:']);
-const AUTH_HEADER = 'authorization';
-const DEFAULT_SERVER_NAME = 'server';
-
-export function parseServerSpec(input: string, overrides: ParseServerSpecOverrides = {}): McpServerSpec {
-  const trimmedInput = input.trim();
-  if (!trimmedInput) {
-    throw new Error('Server input is required.');
-  }
-
-  const forcedTransport = normalizeTransport(overrides.transport);
-  const inferredTransport = inferTransport(trimmedInput);
-  const transport = forcedTransport ?? inferredTransport;
-
-  const spec: McpServerSpec =
-    transport === 'stdio'
-      ? parseStdioSpec(trimmedInput)
-      : parseRemoteSpec(trimmedInput, transport);
-
-  const env = parseKeyValuePairs(overrides.env, '--env');
-  if (env) {
-    spec.env = env;
-  }
-
-  const parsedHeaders = parseKeyValuePairs(overrides.headers ?? overrides.header, '--header');
-  const headers = withAuthHeader(parsedHeaders, overrides.authToken);
-  if (headers) {
-    spec.headers = headers;
-  }
-
-  const oauth = buildOAuthOverrides(overrides.oauthClientId, overrides.oauthCallbackPort);
-  if (oauth) {
-    spec.oauth = oauth;
-  }
-
-  if (typeof overrides.disabled === 'boolean') {
-    spec.disabled = overrides.disabled;
-  }
-
-  spec.name = buildServerName(spec, overrides.name);
-  return spec;
-}
-
-export function splitCommandString(input: string): string[] {
+function splitCommandLine(input: string): string[] {
   const tokens: string[] = [];
   let current = '';
-  let quote: "'" | '"' | null = null;
+  let quote: '"' | "'" | null = null;
+  let tokenStarted = false;
 
-  for (let index = 0; index < input.length; index += 1) {
+  for (let index = 0; index < input.length; index++) {
     const char = input[index];
 
-    if (!quote) {
-      if (char === "'" || char === '"') {
-        quote = char;
+    if (char === '\\' && quote !== "'") {
+      const next = input[index + 1];
+      if (next !== undefined) {
+        current += next;
+        tokenStarted = true;
+        index += 1;
         continue;
-      }
-
-      if (char === '\\') {
-        const next = input[index + 1];
-        if (next && (/\s/.test(next) || next === "'" || next === '"' || next === '\\')) {
-          current += next;
-          index += 1;
-          continue;
-        }
-        current += char;
-        continue;
-      }
-
-      if (/\s/.test(char)) {
-        if (current) {
-          tokens.push(current);
-          current = '';
-        }
-        continue;
-      }
-
-      current += char;
-      continue;
-    }
-
-    if (quote === "'") {
-      if (char === "'") {
-        quote = null;
-      } else {
-        current += char;
       }
       continue;
     }
 
-    if (char === '"') {
+    if (quote === null && (char === '"' || char === "'")) {
+      quote = char;
+      tokenStarted = true;
+      continue;
+    }
+
+    if (char === quote) {
       quote = null;
       continue;
     }
 
-    if (char === '\\') {
-      const next = input[index + 1];
-      if (next && (next === '"' || next === '\\')) {
-        current += next;
-        index += 1;
-        continue;
+    if (quote === null && /\s/.test(char)) {
+      if (tokenStarted) {
+        tokens.push(current);
+        current = '';
+        tokenStarted = false;
       }
-      current += char;
       continue;
     }
 
     current += char;
+    tokenStarted = true;
   }
 
-  if (quote) {
-    throw new Error(`Unterminated ${quote === "'" ? 'single' : 'double'} quote in command input.`);
-  }
-
-  if (current) {
+  if (tokenStarted) {
     tokens.push(current);
   }
 
   return tokens;
 }
 
-export function parseCommandString(input: string): ParsedCommand {
-  const tokens = splitCommandString(input.trim());
+function detectUrlTransport(url: URL): TransportType {
+  if (url.searchParams.get('transport')?.toLowerCase() === 'sse') {
+    return 'sse';
+  }
+  const path = url.pathname.toLowerCase();
+  if (path.endsWith('/sse') || path.includes('/sse/')) {
+    return 'sse';
+  }
+  return 'http';
+}
+
+function parseNameFromUrl(url: URL): string {
+  if (url.hostname) {
+    return (
+      url.hostname
+        .replace(/\./g, '-')
+        .replace(/[^a-zA-Z0-9_-]/g, '')
+        .toLowerCase() || 'mcp-server'
+    );
+  }
+  return 'mcp-server';
+}
+
+function parseNameFromCommand(command: string): string {
+  const segments = command.split(/[\\/]/);
+  const base = segments[segments.length - 1] || command;
+  const noExt = base.endsWith('.cmd') ? base.slice(0, -4) : base;
+  return (
+    noExt
+      .replace(/\.[^.]+$/, '')
+      .replace(/[^a-zA-Z0-9_-]/g, '-')
+      .replace(/-+/g, '-')
+      .replace(/^-|-$/g, '')
+      .toLowerCase() || 'mcp-server'
+  );
+}
+
+function parsePairs(input: string[] | undefined, kind: 'env' | 'header'): Record<string, string> {
+  const result: Record<string, string> = {};
+  if (!input) {
+    return result;
+  }
+
+  for (const raw of input) {
+    const separator = raw.indexOf('=');
+    if (separator <= 0) {
+      throw new Error(`Invalid ${kind} pair: ${raw}`);
+    }
+    const key = raw.slice(0, separator).trim();
+    const value = raw.slice(separator + 1);
+    if (!key) {
+      throw new Error(`Invalid ${kind} pair: ${raw}`);
+    }
+    result[key] = value;
+  }
+
+  return result;
+}
+
+function parseUrlSpec(input: string): McpServerSpec {
+  const url = new URL(input);
+  return {
+    name: parseNameFromUrl(url),
+    transport: detectUrlTransport(url),
+    url: url.href,
+  };
+}
+
+function parseCommandSpec(input: string): McpServerSpec {
+  const tokens = splitCommandLine(input);
   if (tokens.length === 0) {
-    throw new Error('Command input must include at least one token.');
+    throw new Error(`Invalid command spec: ${input}`);
   }
 
-  const [command, ...args] = tokens;
-  return { command, args };
-}
-
-export function parseKeyValuePairs(
-  values: string[] | Record<string, string> | undefined,
-  flagName: string
-): Record<string, string> | undefined {
-  if (!values) {
-    return undefined;
-  }
-
-  const output: Record<string, string> = {};
-
-  if (Array.isArray(values)) {
-    for (const rawEntry of values) {
-      const entry = rawEntry.trim();
-      if (!entry) {
-        continue;
-      }
-
-      const separator = entry.indexOf('=');
-      if (separator <= 0) {
-        throw new Error(`Invalid ${flagName} value "${rawEntry}". Expected KEY=VALUE.`);
-      }
-
-      const key = entry.slice(0, separator).trim();
-      if (!key) {
-        throw new Error(`Invalid ${flagName} value "${rawEntry}". Key cannot be empty.`);
-      }
-
-      output[key] = entry.slice(separator + 1);
-    }
-  } else {
-    for (const [rawKey, rawValue] of Object.entries(values)) {
-      const key = rawKey.trim();
-      if (!key) {
-        throw new Error(`Invalid ${flagName} record. Key cannot be empty.`);
-      }
-      output[key] = String(rawValue);
-    }
-  }
-
-  return Object.keys(output).length > 0 ? output : undefined;
-}
-
-function parseStdioSpec(input: string): McpServerSpec {
-  const { command, args } = parseCommandString(input);
   return {
-    name: '',
+    name: parseNameFromCommand(tokens[0]),
     transport: 'stdio',
-    command,
-    args,
+    command: tokens[0],
+    args: tokens.slice(1),
   };
 }
 
-function parseRemoteSpec(input: string, transport: Exclude<TransportType, 'stdio'>): McpServerSpec {
-  const parsedUrl = parseHttpUrl(input);
-  return {
-    name: '',
-    transport,
-    url: parsedUrl.toString(),
-  };
+function isLikelyUrl(input: string): boolean {
+  return /^https?:\/\//i.test(input.trim());
 }
 
-function inferTransport(input: string): TransportType {
-  if (!isHttpUrl(input)) {
-    return 'stdio';
+function applyOverrides(spec: McpServerSpec, overrides: ServerSpecOverrides | undefined): McpServerSpec {
+  if (!overrides || Object.keys(overrides).length === 0) {
+    return spec;
   }
-  return detectRemoteTransport(input);
-}
 
-export function detectRemoteTransport(input: string): Exclude<TransportType, 'stdio'> {
-  const parsedUrl = parseHttpUrl(input);
-  const pathname = parsedUrl.pathname.toLowerCase();
-  const hash = parsedUrl.hash.toLowerCase();
-  const transportHint = (parsedUrl.searchParams.get('transport') ?? '').toLowerCase();
+  const next: McpServerSpec = { ...spec };
 
-  const hasSseHint =
-    pathname.endsWith('/sse') ||
-    pathname.includes('/sse/') ||
-    hash.includes('sse') ||
-    transportHint === 'sse';
+  if (overrides.name) {
+    next.name = overrides.name;
+  }
 
-  return hasSseHint ? 'sse' : 'http';
-}
+  if (overrides.env?.length) {
+    next.env = {
+      ...(next.env ?? {}),
+      ...parsePairs(overrides.env, 'env'),
+    };
+  }
 
-function isHttpUrl(value: string): boolean {
-  try {
-    if (typeof URL.canParse === 'function' && !URL.canParse(value)) {
-      return false;
+  const headerFromFlag = parsePairs(overrides.header, 'header');
+  const headersFromList = parsePairs(overrides.headers, 'header');
+  if (Object.keys(headerFromFlag).length) {
+    next.headers = {
+      ...(next.headers ?? {}),
+      ...headerFromFlag,
+      ...headersFromList,
+    };
+  } else if (Object.keys(headersFromList).length) {
+    next.headers = {
+      ...(next.headers ?? {}),
+      ...headersFromList,
+    };
+  }
+
+  if (overrides.authToken) {
+    next.headers = {
+      ...(next.headers ?? {}),
+      Authorization: `Bearer ${overrides.authToken}`,
+    };
+  }
+
+  if (overrides.oauthClientId) {
+    next.oauth = {
+      ...(next.oauth ?? {}),
+      clientId: overrides.oauthClientId,
+    };
+  }
+
+  const transport = normalizeTransport(overrides.transport);
+  if (transport && transport !== spec.transport) {
+    if ((spec.transport === 'stdio' && transport !== 'stdio') || (spec.transport !== 'stdio' && transport === 'stdio')) {
+      throw new Error(`Cannot override transport ${spec.transport} to ${transport} with this input form`);
     }
-    const parsed = new URL(value);
-    return REMOTE_PROTOCOLS.has(parsed.protocol);
-  } catch {
-    return false;
+    next.transport = transport;
   }
+
+  return next;
 }
 
-function parseHttpUrl(value: string): URL {
-  try {
-    const parsed = new URL(value);
-    if (!REMOTE_PROTOCOLS.has(parsed.protocol)) {
-      throw new Error(
-        `Unsupported URL protocol "${parsed.protocol}". Only http and https are supported.`
-      );
-    }
-    return parsed;
-  } catch (error) {
-    if (error instanceof Error) {
-      throw new Error(`Invalid URL input "${value}": ${error.message}`);
-    }
-    throw new Error(`Invalid URL input "${value}".`);
+export function parseServerInput(input: string, overrides?: ServerSpecOverrides): McpServerSpec {
+  const trimmed = input.trim();
+  if (!trimmed) {
+    throw new Error('Server spec input is empty');
   }
+
+  const unquotedInput = trimmed.replace(/^\s*(["'])(.*)\1\s*$/, '$2');
+  const base = isLikelyUrl(unquotedInput) ? parseUrlSpec(unquotedInput) : parseCommandSpec(unquotedInput);
+
+  return applyOverrides(base, overrides);
 }
 
-function normalizeTransport(transport: ParseServerSpecOverrides['transport']): TransportType | undefined {
-  if (transport === undefined) {
-    return undefined;
-  }
-
-  const normalized = String(transport).trim().toLowerCase() as TransportType;
-  if (normalized === 'stdio' || normalized === 'http' || normalized === 'sse') {
-    return normalized;
-  }
-
-  throw new Error(
-    `Unsupported transport "${transport}". Expected one of: stdio, http, sse.`
-  );
+export function parseServerSpec(input: string, overrides?: ServerSpecOverrides): McpServerSpec {
+  return parseServerInput(input, overrides);
 }
 
-function withAuthHeader(
-  headers: Record<string, string> | undefined,
-  authToken: string | undefined
-): Record<string, string> | undefined {
-  const token = authToken?.trim();
-  if (!token) {
-    return headers;
-  }
-
-  const output = { ...(headers ?? {}) };
-  const hasAuthorizationHeader = Object.keys(output).some(
-    (key) => key.trim().toLowerCase() === AUTH_HEADER
-  );
-
-  if (!hasAuthorizationHeader) {
-    output.Authorization = `Bearer ${token}`;
-  }
-
-  return output;
-}
-
-function buildOAuthOverrides(
-  oauthClientId: string | undefined,
-  oauthCallbackPort: number | undefined
-): McpServerSpec['oauth'] | undefined {
-  const oauth: NonNullable<McpServerSpec['oauth']> = {};
-
-  if (oauthClientId?.trim()) {
-    oauth.clientId = oauthClientId.trim();
-  }
-
-  if (oauthCallbackPort !== undefined) {
-    if (!Number.isInteger(oauthCallbackPort) || oauthCallbackPort <= 0) {
-      throw new Error(
-        `Invalid --oauth-callback-port "${oauthCallbackPort}". Expected a positive integer.`
-      );
-    }
-    oauth.callbackPort = oauthCallbackPort;
-  }
-
-  return Object.keys(oauth).length > 0 ? oauth : undefined;
-}
-
-function buildServerName(spec: McpServerSpec, overrideName: string | undefined): string {
-  if (overrideName?.trim()) {
-    return overrideName.trim();
-  }
-
-  if (spec.transport === 'stdio') {
-    return inferNameFromCommand(spec.command ?? '', spec.args ?? []);
-  }
-
-  return inferNameFromUrl(spec.url ?? '');
-}
-
-function inferNameFromCommand(command: string, args: string[]): string {
-  const commandName = basename(command).replace(/\.(exe|cmd|bat|sh)$/i, '');
-
-  if (commandName.toLowerCase() === 'npx') {
-    const packageArg = args.find((arg) => !arg.startsWith('-'));
-    if (packageArg) {
-      const normalizedPackage = packageArg.split('/').filter(Boolean).pop() ?? packageArg;
-      return sanitizeServerName(normalizedPackage);
-    }
-  }
-
-  return sanitizeServerName(commandName);
-}
-
-function inferNameFromUrl(url: string): string {
-  const parsedUrl = parseHttpUrl(url);
-  const pathLastSegment = parsedUrl.pathname
-    .split('/')
-    .map((segment) => segment.trim())
-    .filter(Boolean)
-    .pop();
-
-  const candidate = [parsedUrl.hostname.replace(/^www\./i, ''), pathLastSegment]
-    .filter(Boolean)
-    .join('-');
-
-  return sanitizeServerName(candidate);
-}
-
-function sanitizeServerName(value: string): string {
-  const normalized = value
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9_-]+/g, '-')
-    .replace(/^-+|-+$/g, '');
-
-  return normalized || DEFAULT_SERVER_NAME;
-}
+export { splitCommandLine as splitCommandSpecArgs };

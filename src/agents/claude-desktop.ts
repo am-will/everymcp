@@ -1,88 +1,78 @@
-import { existsSync } from 'node:fs';
-import * as transformer from '../core/transformer.js';
-import type { ConfigPathInfo, ConfigScope, McpServerSpec, TransportType } from '../types/index.js';
 import { BaseAdapter } from './base-adapter.js';
+import { ConfigPathInfo, McpServerSpec } from '../types/index.js';
+import {
+  directoryExists,
+  fileExists,
+  getPlatform,
+  resolveConfigPath,
+  wrapCommandForWindows,
+} from '../utils/platform.js';
+import path from 'node:path';
 
-interface TransformerLike {
-  wrapStdioForClaudeDesktopWindows?: (
-    spec: McpServerSpec,
-  ) => Partial<McpServerSpec> | Record<string, unknown>;
+function getConfigPath(): string {
+  const platform = getPlatform();
+  if (platform === 'macos') {
+    return resolveConfigPath('~/Library/Application Support/Claude/claude_desktop_config.json');
+  }
+
+  if (platform === 'windows') {
+    return resolveConfigPath('%APPDATA%\\Claude\\claude_desktop_config.json');
+  }
+
+  return resolveConfigPath('~/.config/Claude/claude_desktop_config.json');
 }
-
-const transformUtils = transformer as TransformerLike;
 
 export class ClaudeDesktopAdapter extends BaseAdapter {
   id = 'claude-desktop';
   displayName = 'Claude Desktop';
-  supportedTransports: TransportType[] = ['stdio'];
-  supportedScopes: ConfigScope[] = ['global'];
+  supportedTransports = ['stdio'] as const;
+  supportedScopes = ['global'] as const;
   restartRequired = true;
-  protected rootKey = 'mcpServers';
+  rootKey = 'mcpServers';
+  detectionCommands = ['claude'];
 
-  getConfigPaths(): ConfigPathInfo[] {
-    const configPath = this.getGlobalConfigPath();
+  async getConfigPaths(): Promise<ConfigPathInfo[]> {
+    const configPath = getConfigPath();
+    const configDirectory = path.dirname(configPath);
+    const exists = (await fileExists(configPath)) || (await directoryExists(configDirectory));
+
     return [
       {
-        exists: existsSync(configPath),
-        path: configPath,
         scope: 'global',
+        path: configPath,
+        exists,
       },
     ];
   }
 
-  async detect(): Promise<boolean> {
-    try {
-      if (await this.directoryExists(this.getGlobalConfigDirectory())) {
-        return true;
-      }
+  transformSpec(spec: McpServerSpec): Record<string, any> {
+    const server: Record<string, any> = {
+      ...(spec.env ? { env: spec.env } : null),
+      ...(spec.oauth ? { oauth: spec.oauth } : null),
+    };
 
-      if (this.getPlatform() === 'macos' && (await this.directoryExists('/Applications/Claude.app'))) {
-        return true;
-      }
-
-      return this.commandExists('claude');
-    } catch {
-      return false;
-    }
-  }
-
-  transformSpec(spec: McpServerSpec): Record<string, unknown> {
-    const config = this.toBaseServerConfig(spec);
-
-    if (this.getPlatform() === 'windows' && spec.transport === 'stdio') {
-      const wrapper = transformUtils.wrapStdioForClaudeDesktopWindows;
-      if (typeof wrapper === 'function') {
-        const wrapped = wrapper(spec);
-
-        if (typeof wrapped.command === 'string') {
-          config.command = wrapped.command;
-        }
-        if (Array.isArray(wrapped.args)) {
-          config.args = [...wrapped.args];
-        }
+    if (spec.command) {
+      const wrapped = wrapCommandForWindows(spec.command, spec.args ?? []);
+      server.command = wrapped.command;
+      if (wrapped.args.length > 0) {
+        server.args = wrapped.args;
       }
     }
 
-    return config;
-  }
+    if (spec.headers) {
+      server.headers = spec.headers;
+    }
 
-  private getGlobalConfigPath(): string {
-    if (this.getPlatform() === 'macos') {
-      return this.resolvePath('~/Library/Application Support/Claude/claude_desktop_config.json');
+    if (spec.url) {
+      server.url = spec.url;
     }
-    if (this.getPlatform() === 'windows') {
-      return this.resolvePath('%APPDATA%\\Claude\\claude_desktop_config.json');
-    }
-    return this.resolvePath('~/.config/Claude/claude_desktop_config.json');
-  }
 
-  private getGlobalConfigDirectory(): string {
-    if (this.getPlatform() === 'macos') {
-      return this.resolvePath('~/Library/Application Support/Claude');
+    if (spec.disabled !== undefined) {
+      server.disabled = spec.disabled;
     }
-    if (this.getPlatform() === 'windows') {
-      return this.resolvePath('%APPDATA%\\Claude');
-    }
-    return this.resolvePath('~/.config/Claude');
+
+    return server;
   }
 }
+
+export default ClaudeDesktopAdapter;

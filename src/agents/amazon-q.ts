@@ -1,57 +1,71 @@
-import { existsSync } from 'node:fs';
-
-import type { ConfigPathInfo, ConfigScope, McpServerSpec, TransportType } from '../types/index.js';
-import { commandExists, directoryExists, resolveConfigPath } from '../utils/platform.js';
+import path from 'node:path';
 import { BaseAdapter } from './base-adapter.js';
+import type { ConfigPathInfo, McpServerSpec } from '../types/index.js';
+import { commandExists, directoryExists, fileExists, resolveConfigPath } from '../utils/platform.js';
+
+const CONFIG_PATH = resolveConfigPath('~/.aws/amazonq/mcp.json');
+
+function buildServerConfig(spec: McpServerSpec): Record<string, unknown> {
+  const serverConfig: Record<string, unknown> = {};
+
+  if (spec.command) {
+    serverConfig.command = spec.command;
+  }
+
+  if (spec.args && spec.args.length > 0) {
+    serverConfig.args = spec.args;
+  }
+
+  if (spec.url) {
+    serverConfig.url = spec.url;
+  }
+
+  if (spec.headers) {
+    serverConfig.headers = spec.headers;
+  }
+
+  if (spec.env) {
+    serverConfig.env = spec.env;
+  }
+
+  if (spec.oauth) {
+    serverConfig.oauth = spec.oauth;
+  }
+
+  return serverConfig;
+}
 
 export class AmazonQAdapter extends BaseAdapter {
   id = 'amazon-q';
-  displayName = 'Amazon Q Developer';
-  supportedTransports: TransportType[] = ['stdio', 'http'];
-  supportedScopes: ConfigScope[] = ['global'];
+  displayName = 'Amazon Q';
+  supportedTransports = ['stdio', 'http'] as const;
+  supportedScopes = ['global'] as const;
   restartRequired = false;
+  rootKey = 'mcpServers';
 
-  getConfigPaths(): ConfigPathInfo[] {
-    const globalPath = resolveConfigPath('~/.aws/amazonq/mcp.json');
-
+  async getConfigPaths(): Promise<ConfigPathInfo[]> {
     return [
       {
         scope: 'global',
-        path: globalPath,
-        exists: existsSync(globalPath),
+        path: CONFIG_PATH,
+        exists: await fileExists(CONFIG_PATH),
       },
     ];
   }
 
   async detect(): Promise<boolean> {
-    const [hasCli, hasConfigDir] = await Promise.all([
-      commandExists('q'),
-      directoryExists(resolveConfigPath('~/.aws/amazonq/')),
-    ]);
-
-    return hasCli || hasConfigDir;
+    try {
+      return (
+        commandExists('q') ||
+        (await directoryExists(path.dirname(CONFIG_PATH)))
+      );
+    } catch {
+      return false;
+    }
   }
 
-  transformSpec(spec: McpServerSpec): Record<string, any> {
-    const transformed: Record<string, unknown> =
-      spec.transport === 'stdio'
-        ? {
-            command: spec.command ?? '',
-            args: spec.args ?? [],
-          }
-        : {
-            url: spec.url ?? '',
-          };
-
-    if (spec.env && Object.keys(spec.env).length > 0) {
-      transformed.env = { ...spec.env };
-    }
-
-    if (spec.transport === 'http' && spec.headers && Object.keys(spec.headers).length > 0) {
-      transformed.headers = { ...spec.headers };
-    }
-
-    return transformed;
+  transformSpec(spec: McpServerSpec): Record<string, unknown> {
+    return buildServerConfig(spec);
   }
 }
 

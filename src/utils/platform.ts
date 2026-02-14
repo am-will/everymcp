@@ -1,105 +1,127 @@
-import { execFile } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { accessSync, constants, statSync } from 'node:fs';
 import { stat } from 'node:fs/promises';
-import os from 'node:os';
-import path from 'node:path';
-import { promisify } from 'node:util';
+import { spawnSync } from 'node:child_process';
+import { platform as nodePlatform, homedir } from 'node:os';
+import * as path from 'node:path';
 
 export type Platform = 'macos' | 'linux' | 'windows';
-export type VSCodeVariant = 'Code' | 'Code - Insiders' | 'VSCodium';
 
-const execFileAsync = promisify(execFile);
-const WINDOWS_NPX_FALLBACK = 'C:\\Program Files\\nodejs\\npx.cmd';
+export type VSCodeVariant = 'Code' | 'Code - Insiders' | 'VSCodium' | 'Antigravity';
+
+export interface WrappedCommand {
+  command: string;
+  args: string[];
+}
+
+function stripOuterQuotes(value: string): string {
+  if (value.length >= 2) {
+    if (
+      (value.startsWith('"') && value.endsWith('"')) ||
+      (value.startsWith("'") && value.endsWith("'"))
+    ) {
+      return value.slice(1, -1);
+    }
+  }
+  return value;
+}
+
+function resolveWindowsPlaceholders(value: string): string {
+  return value.replace(/%([^%]+)%/g, (_match, varName: string) => {
+    const envValue = process.env[varName] || process.env[varName.toUpperCase()];
+    if (envValue && envValue.length > 0) {
+      return envValue;
+    }
+    return _match;
+  });
+}
+
+function quoteForCmd(value: string): string {
+  if (value.length === 0) {
+    return '""';
+  }
+  if (/[\s&|^<>]/.test(value)) {
+    return `"${value.replace(/"/g, '\\"')}"`;
+  }
+  return value;
+}
 
 export function getPlatform(): Platform {
-  switch (process.platform) {
+  switch (nodePlatform()) {
     case 'darwin':
       return 'macos';
     case 'win32':
       return 'windows';
-    case 'linux':
-      return 'linux';
     default:
       return 'linux';
   }
 }
 
-export function expandHome(inputPath: string): string {
-  if (!inputPath) {
-    return inputPath;
+export function expandHome(p: string): string {
+  if (!p || !p.startsWith('~')) {
+    return p;
   }
-
-  if (inputPath === '~') {
-    return os.homedir();
+  const home = homedir();
+  if (!home) {
+    return p;
   }
-
-  if (inputPath.startsWith('~/') || inputPath.startsWith('~\\')) {
-    return path.join(os.homedir(), inputPath.slice(2));
+  if (p === '~') {
+    return home;
   }
-
-  return inputPath;
-}
-
-function expandPercentEnvVars(template: string): string {
-  return template.replace(/%([^%]+)%/g, (fullMatch: string, varName: string) => {
-    const value = process.env[varName];
-    if (typeof value === 'string' && value.length > 0) {
-      return value;
-    }
-    return fullMatch;
-  });
-}
-
-function expandDollarEnvVars(template: string): string {
-  return template.replace(
-    /\$\{([^}]+)\}|\$([A-Za-z_][A-Za-z0-9_]*)/g,
-    (fullMatch: string, braceVar: string | undefined, simpleVar: string | undefined) => {
-      const varName = braceVar ?? simpleVar;
-      if (!varName) {
-        return fullMatch;
-      }
-
-      const value = process.env[varName];
-      if (typeof value === 'string' && value.length > 0) {
-        return value;
-      }
-
-      return fullMatch;
-    },
-  );
+  if (!p.startsWith('~/') && !p.startsWith('~\\') && !p.startsWith('~/.') && !p.startsWith('~\\.')) {
+    return p;
+  }
+  return path.join(home, p.slice(2));
 }
 
 export function resolveConfigPath(template: string): string {
-  const trimmed = template.trim();
-  const envExpanded = expandDollarEnvVars(expandPercentEnvVars(trimmed));
-  const homeExpanded = expandHome(envExpanded);
-
-  const looksWindowsPath =
-    getPlatform() === 'windows' || /^[A-Za-z]:[\\/]/.test(homeExpanded) || homeExpanded.includes('\\');
-
-  return looksWindowsPath ? path.win32.normalize(homeExpanded) : path.posix.normalize(homeExpanded);
+  if (!template) {
+    return template;
+  }
+  const expandedEnv = resolveWindowsPlaceholders(template);
+  const expandedHome = expandHome(expandedEnv);
+  if (!path.isAbsolute(expandedHome)) {
+    return path.normalize(expandedHome);
+  }
+  return path.normalize(expandedHome);
 }
 
-export async function commandExists(cmd: string): Promise<boolean> {
-  const trimmed = cmd.trim();
-  if (!trimmed) {
+export function commandExists(cmd: string): boolean {
+  const normalizedCommand = stripOuterQuotes(cmd.trim());
+  if (!normalizedCommand) {
     return false;
   }
 
-  const checker = getPlatform() === 'windows' ? 'where' : 'which';
+  const isPathLike =
+    normalizedCommand.includes(path.sep) ||
+    normalizedCommand.includes('/') ||
+    normalizedCommand.includes('\\') ||
+    path.isAbsolute(normalizedCommand);
 
-  try {
-    const result = await execFileAsync(checker, [trimmed], { windowsHide: true });
-    return result.stdout.trim().length > 0;
-  } catch {
-    return false;
+  if (isPathLike) {
+    try {
+      accessSync(normalizedCommand, constants.X_OK);
+      const stats = statSync(normalizedCommand);
+      return stats.isFile();
+    } catch {
+      return false;
+    }
   }
+
+  const commandName = normalizedCommand;
+  const checkCommand = getPlatform() === 'windows' ? 'where' : 'which';
+  const result = spawnSync(checkCommand, [commandName], {
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+    windowsHide: true,
+  });
+
+  return result.status === 0 && Boolean((result.stdout || '').toString().trim());
 }
 
 export async function directoryExists(dir: string): Promise<boolean> {
   try {
-    const info = await stat(dir);
-    return info.isDirectory();
+    const stats = await stat(dir);
+    return stats.isDirectory();
   } catch {
     return false;
   }
@@ -107,114 +129,75 @@ export async function directoryExists(dir: string): Promise<boolean> {
 
 export async function fileExists(file: string): Promise<boolean> {
   try {
-    const info = await stat(file);
-    return info.isFile();
+    const stats = await stat(file);
+    return stats.isFile();
   } catch {
     return false;
   }
 }
 
-function resolveWindowsNpx(command: string): string {
-  const normalized = path.win32.basename(command).toLowerCase();
-  if (normalized !== 'npx' && normalized !== 'npx.cmd') {
-    return command;
+function getNpxExecutable(): string | null {
+  if (getPlatform() !== 'windows') {
+    return null;
   }
+  const resolved = spawnSync('where', ['npx'], {
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+    windowsHide: true,
+  });
 
-  const candidates = [
-    process.env.NPX_PATH,
-    process.env.ProgramFiles ? path.win32.join(process.env.ProgramFiles, 'nodejs', 'npx.cmd') : undefined,
-    process.env['ProgramFiles(x86)']
-      ? path.win32.join(process.env['ProgramFiles(x86)'], 'nodejs', 'npx.cmd')
-      : undefined,
-    process.env.USERPROFILE
-      ? path.win32.join(process.env.USERPROFILE, 'AppData', 'Roaming', 'npm', 'npx.cmd')
-      : undefined,
-    WINDOWS_NPX_FALLBACK,
-  ].filter((candidate): candidate is string => Boolean(candidate));
-
-  for (const candidate of candidates) {
-    if (existsSync(candidate)) {
-      return candidate;
-    }
+  if (resolved.status !== 0) {
+    return null;
   }
-
-  return 'npx.cmd';
+  const firstLine = (resolved.stdout || '').toString().split(/\r?\n/)[0]?.trim();
+  if (!firstLine) {
+    return null;
+  }
+  return firstLine;
 }
 
-export function wrapCommandForWindows(
-  command: string,
-  args: string[] = [],
-): {
-  command: string;
-  args: string[];
-} {
+export function wrapCommandForWindows(command: string, args: string[] = []): WrappedCommand {
   if (getPlatform() !== 'windows') {
-    return { command, args: [...args] };
+    return { command, args };
   }
 
-  const resolvedCommand = resolveWindowsNpx(command);
+  const trimmedCommand = stripOuterQuotes(command.trim());
+  const normalizedCommand =
+    trimmedCommand.toLowerCase() === 'npx' ? getNpxExecutable() || trimmedCommand : trimmedCommand;
+  const commandLine = [quoteForCmd(normalizedCommand), ...args.map(quoteForCmd)].join(' ').trim();
   return {
     command: 'cmd',
-    args: ['/c', resolvedCommand, ...args],
+    args: ['/c', commandLine],
   };
 }
 
-function detectVSCodeVariantFromRuntime(): VSCodeVariant | null {
-  const signals = [
-    process.execPath,
-    process.env.TERM_PROGRAM,
-    process.env.VSCODE_GIT_ASKPASS_MAIN,
-    process.env.VSCODE_IPC_HOOK,
-    process.env.VSCODE_CWD,
-  ]
-    .filter((value): value is string => Boolean(value))
-    .join(' ')
-    .toLowerCase();
-
-  if (signals.includes('insiders')) {
-    return 'Code - Insiders';
+export function getVSCodeVariant(): VSCodeVariant {
+  if (commandExists('antigravity')) {
+    return 'Antigravity';
   }
 
-  if (signals.includes('codium')) {
-    return 'VSCodium';
-  }
-
-  if (signals.includes('vscode') || signals.includes('code')) {
+  if (getPlatform() === 'windows') {
+    if (commandExists('code-insiders')) {
+      return 'Code - Insiders';
+    }
+    if (commandExists('codium')) {
+      return 'VSCodium';
+    }
+    if (commandExists('code')) {
+      return 'Code';
+    }
     return 'Code';
   }
 
-  return null;
-}
-
-function getVSCodeSearchRoot(): string {
-  const platform = getPlatform();
-  if (platform === 'macos') {
-    return path.join(os.homedir(), 'Library', 'Application Support');
-  }
-
-  if (platform === 'windows') {
-    if (process.env.APPDATA) {
-      return process.env.APPDATA;
+  if (commandExists('code-insiders') || commandExists('codium')) {
+    if (commandExists('code-insiders')) {
+      return 'Code - Insiders';
     }
-    return path.win32.join(os.homedir(), 'AppData', 'Roaming');
+    return 'VSCodium';
   }
 
-  return path.join(os.homedir(), '.config');
-}
-
-export function getVSCodeVariant(): VSCodeVariant {
-  const runtimeVariant = detectVSCodeVariantFromRuntime();
-  if (runtimeVariant) {
-    return runtimeVariant;
-  }
-
-  const root = getVSCodeSearchRoot();
-  const variants: VSCodeVariant[] = ['Code', 'Code - Insiders', 'VSCodium'];
-
-  for (const variant of variants) {
-    if (existsSync(path.join(root, variant))) {
-      return variant;
-    }
+  if (commandExists('code')) {
+    return 'Code';
   }
 
   return 'Code';

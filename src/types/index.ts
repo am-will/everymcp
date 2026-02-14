@@ -1,34 +1,29 @@
-export type TransportType = 'stdio' | 'http' | 'sse';
+/**
+ * Shared type definitions for everymcp adapters and configuration operations.
+ */
 
-export type ConfigScope = 'global' | 'project';
+export type TransportType = 'stdio' | 'http' | 'sse';
 
 export interface McpServerSpec {
   name: string;
   transport: TransportType;
+  // stdio fields
   command?: string;
   args?: string[];
+  // http/sse fields
   url?: string;
   headers?: Record<string, string>;
+  // auth
   env?: Record<string, string>;
-  oauth?: { clientId?: string; callbackPort?: number };
+  oauth?: {
+    clientId?: string;
+    callbackPort?: number;
+  };
+  // metadata
   disabled?: boolean;
 }
 
-export interface AgentAdapter {
-  id: string;
-  displayName: string;
-  supportedTransports: TransportType[];
-  supportedScopes: ConfigScope[];
-  restartRequired: boolean;
-  detect(): Promise<boolean>;
-  getConfigPaths(): ConfigPathInfo[];
-  readServers(scope: ConfigScope): Promise<Record<string, any>>;
-  addServer(spec: McpServerSpec, scope: ConfigScope): Promise<ConfigChange>;
-  removeServer(name: string, scope: ConfigScope): Promise<ConfigChange>;
-  transformSpec(spec: McpServerSpec): Record<string, any>;
-  supportsScope(scope: ConfigScope): boolean;
-  supportsTransport(transport: TransportType): boolean;
-}
+export type ConfigScope = 'global' | 'project';
 
 export interface ConfigPathInfo {
   scope: ConfigScope;
@@ -43,7 +38,23 @@ export interface ConfigChange {
   after: string;
   action: 'add' | 'remove';
   serverName: string;
-  warning?: string;
+  warning?: string; // e.g., "Restart required", "stdio only"
+}
+
+export interface AgentAdapter {
+  id: string;
+  displayName: string;
+  supportedTransports: readonly TransportType[];
+  supportedScopes: readonly ConfigScope[];
+  restartRequired: boolean; // Show "restart required" message after install
+  detect(): Promise<boolean>;
+  getConfigPaths(): Promise<ConfigPathInfo[]>;
+  readServers(scope: ConfigScope): Promise<Record<string, any>>;
+  addServer(spec: McpServerSpec, scope: ConfigScope): Promise<ConfigChange>;
+  removeServer(name: string, scope: ConfigScope): Promise<ConfigChange>;
+  transformSpec(spec: McpServerSpec): Record<string, any>;
+  supportsScope(scope: ConfigScope): boolean;
+  supportsTransport(transport: TransportType): boolean;
 }
 
 export interface DetectedAgent {

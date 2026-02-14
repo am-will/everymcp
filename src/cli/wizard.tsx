@@ -1,98 +1,128 @@
-import React, {useMemo} from 'react';
-import {Box, Text} from 'ink';
-import {MultiSelect} from '@inkjs/ui';
-import type {ConfigScope, DetectedAgent, TransportType} from '../types/index.js';
+import chalk from 'chalk';
+import { Box, Text } from 'ink';
+import { MultiSelect } from '@inkjs/ui';
+import type { ConfigScope, DetectedAgent, TransportType } from '../types/index.js';
 
-export interface WizardProps {
-	detectedAgents: DetectedAgent[];
-	scope: ConfigScope;
-	transport: TransportType;
-	onSubmit: (selected: string[]) => void;
+interface WizardProps {
+  detectedAgents: DetectedAgent[];
+  scope: ConfigScope;
+  transport: TransportType;
+  onSubmit: (selected: string[]) => void;
 }
 
-interface AgentChoice {
-	id: string;
-	label: string;
-	reason?: string;
+interface WizardOption {
+  label: string;
+  value: string;
 }
 
-function getScopePath(agent: DetectedAgent, scope: ConfigScope): string {
-	return agent.configPaths.find(pathInfo => pathInfo.scope === scope)?.path ?? agent.configPaths[0]?.path ?? 'no config path';
+interface WizardEntry {
+  id: string;
+  label: string;
+  compatible: boolean;
 }
 
-function getIncompatibilityReason(
-	agent: DetectedAgent,
-	scope: ConfigScope,
-	transport: TransportType
-): string | undefined {
-	const scopeSupported = agent.adapter.supportedScopes.includes(scope);
-	const transportSupported = agent.adapter.supportedTransports.includes(transport);
+const describeScopeIssue = (scopes: readonly ConfigScope[], scope: ConfigScope): string | null => {
+  if (scopes.includes(scope)) {
+    return null;
+  }
 
-	if (scopeSupported && transportSupported) {
-		return undefined;
-	}
+  if (scope === 'project') {
+    return 'global only';
+  }
 
-	const reasons: string[] = [];
+  return 'project only';
+};
 
-	if (!scopeSupported) {
-		reasons.push(`${scope} scope unsupported`);
-	}
+const describeTransportIssue = (transports: readonly TransportType[], transport: TransportType): string | null => {
+  if (transports.includes(transport)) {
+    return null;
+  }
 
-	if (!transportSupported) {
-		reasons.push(`${transport} transport unsupported`);
-	}
+  const supportedCount = transports.length;
 
-	return reasons.join(', ');
-}
+  if (supportedCount === 0) {
+    return 'unsupported transport';
+  }
 
-export function Wizard({detectedAgents, scope, transport, onSubmit}: WizardProps): React.JSX.Element {
-	const choices = useMemo<AgentChoice[]>(() => {
-		return detectedAgents.map(agent => {
-			const configPath = getScopePath(agent, scope);
-			const reason = getIncompatibilityReason(agent, scope, transport);
-			const suffix = reason ? ` (${reason})` : '';
-			return {
-				id: agent.adapter.id,
-				label: `${agent.adapter.displayName} - ${configPath}${suffix}`,
-				reason
-			};
-		});
-	}, [detectedAgents, scope, transport]);
+  if (supportedCount === 1) {
+    return `${transports[0]} only`;
+  }
 
-	const selectable = choices.filter(choice => !choice.reason);
-	const incompatible = choices.filter(choice => choice.reason);
-	const defaultSelection = selectable.map(choice => choice.id);
+  return `${transports.join(' / ')} only`;
+};
 
-	return (
-		<Box flexDirection="column" gap={1}>
-			<Text bold>Select target agents</Text>
-			<Text dimColor>Use arrow keys to navigate, space to toggle, and Enter to submit.</Text>
+const formatPath = (agent: DetectedAgent): string => {
+  if (agent.configPaths.length === 0) {
+    return 'No config path';
+  }
 
-			{selectable.length === 0 ? (
-				<Text color="yellow">No agents are compatible with the chosen scope and transport.</Text>
-			) : (
-				<MultiSelect
-					defaultValue={defaultSelection}
-					options={selectable.map(choice => ({
-						label: choice.label,
-						value: choice.id
-					}))}
-					onSubmit={value => {
-						onSubmit(value);
-					}}
-				/>
-			)}
+  return agent.configPaths
+    .map((entry: { scope: ConfigScope; path: string; exists: boolean }) => {
+      return `${entry.scope}: ${entry.path}${entry.exists ? '' : ' (missing)'}`;
+    })
+    .join(' · ');
+};
 
-			{incompatible.length > 0 && (
-				<Box flexDirection="column">
-					<Text color="yellow">Unavailable for this run:</Text>
-					{incompatible.map(choice => (
-						<Text dimColor key={choice.id}>
-							- {choice.label}
-						</Text>
-					))}
-				</Box>
-			)}
-		</Box>
-	);
+const formatCompatibility = (
+  adapter: { supportedScopes: readonly ConfigScope[]; supportedTransports: readonly TransportType[] },
+  scope: ConfigScope,
+  transport: TransportType,
+): string | null => {
+  const scopeIssue = describeScopeIssue(adapter.supportedScopes, scope);
+  const transportIssue = describeTransportIssue(adapter.supportedTransports, transport);
+
+  if (scopeIssue === null && transportIssue === null) {
+    return null;
+  }
+
+  if (scopeIssue && transportIssue) {
+    return `${scopeIssue}; ${transportIssue}`;
+  }
+
+  return scopeIssue ?? transportIssue;
+};
+
+export function Wizard({ detectedAgents, scope, transport, onSubmit }: WizardProps) {
+  const entries: WizardEntry[] = detectedAgents.map((agent: DetectedAgent) => {
+    const compatible =
+      agent.adapter.supportedScopes.includes(scope) &&
+      agent.adapter.supportedTransports.includes(transport);
+
+    const compatibilityIssue = formatCompatibility(agent.adapter, scope, transport);
+
+    const rawLabel = `${agent.adapter.displayName} (${formatPath(agent)})${
+      compatibilityIssue ? ` (${compatibilityIssue})` : ''
+    }`;
+
+    return {
+      id: agent.adapter.id,
+      label: compatible ? rawLabel : chalk.dim(rawLabel),
+      compatible,
+    };
+  });
+
+  const options: WizardOption[] = entries.map((entry: WizardEntry) => ({
+    value: entry.id,
+    label: entry.label,
+  }));
+
+  const defaultValue = detectedAgents.map((agent: DetectedAgent) => agent.adapter.id);
+  const compatibleSet = new Set(entries.filter((entry) => entry.compatible).map((entry) => entry.id));
+
+  return (
+    <Box flexDirection="column" gap={1}>
+      <Text>Detected agents</Text>
+      <MultiSelect
+        defaultValue={defaultValue}
+        options={options}
+        onSubmit={(selected: string[]) => {
+          const finalSelection = selected.filter((id: string) => compatibleSet.has(id));
+          onSubmit(finalSelection);
+        }}
+      />
+      <Text dimColor>
+        Incompatible agents are dimmed and will be skipped.
+      </Text>
+    </Box>
+  );
 }

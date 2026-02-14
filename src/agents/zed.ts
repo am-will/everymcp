@@ -1,76 +1,70 @@
-import { existsSync } from 'node:fs';
-import * as transformer from '../core/transformer.js';
-import type { ConfigPathInfo, ConfigScope, McpServerSpec, TransportType } from '../types/index.js';
 import { BaseAdapter } from './base-adapter.js';
+import { ConfigPathInfo, McpServerSpec } from '../types/index.js';
+import { directoryExists, getPlatform, resolveConfigPath, fileExists } from '../utils/platform.js';
 
-interface TransformerLike {
-  addZedFields?: (config: Record<string, unknown>) => Record<string, unknown>;
+function getGlobalPath(): string {
+  if (getPlatform() === 'windows') {
+    return resolveConfigPath('%APPDATA%\\Zed\\settings.json');
+  }
+
+  return resolveConfigPath('~/.config/zed/settings.json');
 }
 
-const transformUtils = transformer as TransformerLike;
+function getProjectPath(): string {
+  return resolveConfigPath('.zed/settings.json');
+}
 
 export class ZedAdapter extends BaseAdapter {
   id = 'zed';
   displayName = 'Zed';
-  supportedTransports: TransportType[] = ['stdio', 'http'];
-  supportedScopes: ConfigScope[] = ['global', 'project'];
+  supportedTransports = ['stdio', 'http'] as const;
+  supportedScopes = ['global', 'project'] as const;
   restartRequired = false;
-  protected rootKey = 'context_servers';
+  rootKey = 'context_servers';
+  detectionCommands = ['zed'];
 
-  getConfigPaths(): ConfigPathInfo[] {
-    const globalPath = this.getGlobalSettingsPath();
-    const projectPath = '.zed/settings.json';
+  async detect(): Promise<boolean> {
+    if (await super.detect()) {
+      return true;
+    }
+
+    if (getPlatform() === 'windows') {
+      return directoryExists(resolveConfigPath('%APPDATA%\\Zed'));
+    }
+
+    return directoryExists(resolveConfigPath('~/.config/zed'));
+  }
+
+  async getConfigPaths(): Promise<ConfigPathInfo[]> {
+    const globalConfig = getGlobalPath();
+    const projectConfig = getProjectPath();
 
     return [
       {
-        exists: existsSync(globalPath),
-        path: globalPath,
         scope: 'global',
+        path: globalConfig,
+        exists: await fileExists(globalConfig),
       },
       {
-        exists: existsSync(projectPath),
-        path: projectPath,
         scope: 'project',
+        path: projectConfig,
+        exists: await fileExists(projectConfig),
       },
     ];
   }
 
-  async detect(): Promise<boolean> {
-    try {
-      if (await this.directoryExists(this.getGlobalConfigDirectory())) {
-        return true;
-      }
-      return this.commandExists('zed');
-    } catch {
-      return false;
-    }
-  }
-
-  transformSpec(spec: McpServerSpec): Record<string, unknown> {
-    const config = this.toBaseServerConfig(spec);
-    const addZedFields = transformUtils.addZedFields;
-
-    if (typeof addZedFields === 'function') {
-      return addZedFields(config);
-    }
-
+  transformSpec(spec: McpServerSpec): Record<string, any> {
     return {
-      ...config,
       source: 'custom',
+      ...(spec.command ? { command: spec.command } : null),
+      ...(spec.args ? { args: spec.args } : null),
+      ...(spec.env ? { env: spec.env } : null),
+      ...(spec.url ? { url: spec.url } : null),
+      ...(spec.headers ? { headers: spec.headers } : null),
+      ...(spec.oauth ? { oauth: spec.oauth } : null),
+      ...(spec.disabled !== undefined ? { disabled: spec.disabled } : null),
     };
   }
-
-  private getGlobalSettingsPath(): string {
-    if (this.getPlatform() === 'windows') {
-      return this.resolvePath('%APPDATA%\\Zed\\settings.json');
-    }
-    return this.resolvePath('~/.config/zed/settings.json');
-  }
-
-  private getGlobalConfigDirectory(): string {
-    if (this.getPlatform() === 'windows') {
-      return this.resolvePath('%APPDATA%\\Zed');
-    }
-    return this.resolvePath('~/.config/zed');
-  }
 }
+
+export default ZedAdapter;

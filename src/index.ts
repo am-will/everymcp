@@ -907,7 +907,22 @@ async function runInteractiveWizard(rawOptions: UnknownRecord): Promise<void> {
     return;
   }
 
-  const selection = normalizeInteractiveResult(await runLauncher(rawOptions));
+  const detectedAgents = await loadDetectedAgents();
+  const installedAgents = detectedAgents
+    .filter(agent => agent.detected)
+    .map(agent => ({
+      id: agent.id,
+      displayName: agent.displayName,
+      supportedScopes: Array.isArray(agent.adapter.supportedScopes) ? agent.adapter.supportedScopes : [],
+      supportedTransports: Array.isArray(agent.adapter.supportedTransports) ? agent.adapter.supportedTransports : []
+    }));
+
+  const launcherOptions: UnknownRecord = {
+    ...rawOptions,
+    detectedAgents: installedAgents
+  };
+
+  const selection = normalizeInteractiveResult(await runLauncher(launcherOptions));
   if (!selection) {
     return;
   }
@@ -963,7 +978,6 @@ function buildProgram(): Command {
   program
     .option('--agents <list>', 'comma-separated agent ids', parseAgentList, [])
     .option('--all', 'target all detected agents')
-    .option('--dry-run', 'preview changes without writing files')
     .option('--force', 'overwrite existing server entries without prompting')
     .option('--name <name>', 'override server name')
     .option('-e, --env <pair>', 'set env var KEY=VALUE (repeatable)', collectRepeatable, [])

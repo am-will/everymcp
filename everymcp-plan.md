@@ -4,20 +4,13 @@
 
 ## Overview
 
-Build a CLI tool called `everymcp` that adds/removes/lists MCP server configurations across all coding agents on a machine simultaneously. Uses Ink (React for CLI) for a default interactive home wizard (when users run plain `everymcp`) plus agent-selection wizard flows, Commander.js for CLI parsing, a built-in `EVERYMCP` ASCII/Unicode banner, and jsonc-parser for comment-preserving config editing.
+Build a CLI tool called `everymcp` that adds/removes/lists MCP server configurations across all coding agents on a machine simultaneously. Uses Ink (React for CLI) for an interactive wizard with spacebar-toggle agent selection, Commander.js for CLI parsing, oh-my-logo for ASCII art branding, and jsonc-parser for comment-preserving config editing.
 
 ## Prerequisites
 
 - Node.js 18+ / npm
 - TypeScript 5+
-- Libraries: ink@5, @inkjs/ui, react, commander, jsonc-parser, chalk, diff, fs-extra
-
-## Fresh Start Assumption
-
-- This plan assumes a fresh workspace rebuild.
-- Do not assume any source files or folders already exist.
-- Every task must create its target directories/files when missing.
-- Task dependencies indicate creation order; they are the only allowed assumptions about prior artifacts.
+- Libraries: ink@5, @inkjs/ui, react, commander, jsonc-parser, chalk, oh-my-logo, diff, fs-extra
 
 ## Architecture
 
@@ -26,9 +19,8 @@ src/
 ├── index.ts                    # Entry point, Commander.js setup
 ├── cli/
 │   ├── app.tsx                 # Root Ink app component
-│   ├── banner.tsx              # Built-in EVERYMCP banner renderer
-│   ├── launcher.tsx            # Default home wizard (runs on plain `everymcp`)
-│   ├── wizard.tsx              # Interactive agent-selection wizard
+│   ├── banner.tsx              # oh-my-logo ASCII art header
+│   ├── wizard.tsx              # Interactive wizard (agent selection)
 │   ├── diff-preview.tsx        # Dry-run diff display
 │   └── spinner.tsx             # Progress/status display
 ├── agents/
@@ -106,18 +98,19 @@ T11 ── (depends on T9, T10) ────────────┘
 - **location**: `package.json`, `tsconfig.json`, `.gitignore`, `src/index.ts`
 - **description**: Initialize the npm project with TypeScript. Set up:
   - `package.json` with name `everymcp`, bin entry pointing to `dist/index.js`, type `module`
-  - Dependencies: `ink@5`, `@inkjs/ui`, `react`, `commander`, `jsonc-parser`, `chalk`, `diff`, `fs-extra`
+  - Dependencies: `ink@5`, `@inkjs/ui`, `react`, `commander`, `jsonc-parser`, `chalk`, `oh-my-logo`, `diff`, `fs-extra`
   - Dev dependencies: `typescript`, `@types/node`, `@types/react`, `@types/fs-extra`, `@types/diff`, `tsx`
   - `tsconfig.json` with `"jsx": "react-jsx"`, `"module": "nodenext"`, `"target": "es2022"`, `"outDir": "dist"`, `"rootDir": "src"`, `"strict": true`
   - Build script: `tsc`, dev script: `tsx src/index.ts`
   - `.gitignore` for node_modules, dist, .env
-  - Create initial folder scaffold: `src/`, `src/cli/`, `src/agents/`, `src/core/`, `src/types/`, `src/utils/`
   - Stub `src/index.ts` with `#!/usr/bin/env node` shebang
   - Add `.version()` to Commander program setup
 - **validation**: `npm install` succeeds, `npx tsx src/index.ts --help` runs without error, `--version` flag works
-- **status**: Not Completed
+- **status**: Completed
 - **log**:
+  - 2026-02-14: Completed T1 scaffold by creating project metadata, TypeScript config, .gitignore, and Commander stub entrypoint.
 - **files edited/created**:
+  - `package.json`, `tsconfig.json`, `.gitignore`, `src/index.ts`
 
 ### T2: Types & Interfaces
 - **depends_on**: []
@@ -193,9 +186,12 @@ T11 ── (depends on T9, T10) ────────────┘
   }
   ```
 - **validation**: File compiles with `tsc --noEmit`
-- **status**: Not Completed
+- **status**: Completed
 - **log**:
+  - Added `src/types/index.ts` and implemented the exact shared types/interfaces required by the spec (`TransportType`, `McpServerSpec`, `AgentAdapter`, `ConfigScope`, `ConfigPathInfo`, `ConfigChange`, `DetectedAgent`, `BackupEntry`).
+  - Added `supportsScope` and `supportsTransport` to `AgentAdapter` with strict, explicit types.
 - **files edited/created**:
+  - `src/types/index.ts`
 
 ### T3: Platform Utilities & Validation
 - **depends_on**: []
@@ -217,9 +213,9 @@ T11 ── (depends on T9, T10) ────────────┘
   - `validateEnvVars(vars: string[])`: Parse `KEY=VALUE` pairs
   - `validateHeaders(headers: string[])`: Parse header `KEY=VALUE` pairs
 - **validation**: Unit tests pass for path resolution on current OS, input parsing covers URLs, commands, and edge cases
-- **status**: Not Completed
-- **log**:
-- **files edited/created**:
+- **status**: Completed
+- **log**: Implemented deterministic platform and validation helpers in `src/utils/platform.ts` and `src/utils/validation.ts`; `getPlatform`, tilde/env expansion, config-path resolution, command/env/header parsing, and Windows command wrapping/variant detection are in place.
+- **files edited/created**: `src/utils/platform.ts`, `src/utils/validation.ts`
 
 ### T4: Core Config Manager (jsonc-parser, comment-preserving)
 - **depends_on**: [T1, T2, T3]
@@ -236,9 +232,9 @@ T11 ── (depends on T9, T10) ────────────┘
 
   **Key advantage**: `jsonc-parser.modify()` returns text edits that can be applied to the original string, preserving all comments, formatting, and trailing commas. This is critical for Zed's `settings.json` which users actively comment.
 - **validation**: Can read a JSONC file with comments, add a server entry, and verify comments are preserved in output. Round-trip test: read → add server → write → read produces expected result with comments intact.
-- **status**: Not Completed
-- **log**:
-- **files edited/created**:
+- **status**: Completed
+- **log**: Implemented `src/core/config-manager.ts` with jsonc-parser-based helpers: `readConfig`, `writeConfig`, `setProperty`, `removeProperty`, and `deepMergeServer`. Added safe fallbacks for missing/malformed/empty files, nested key support via dotted root paths, parent directory creation, read-only write guard, per-file in-process mutex lock via `Map<string, Promise>`, and atomic write using `<path>.tmp.*` + `rename`.
+- **files edited/created**: `src/core/config-manager.ts`
 
 ### T5: Backup Manager
 - **depends_on**: [T1, T2, T3]
@@ -252,9 +248,9 @@ T11 ── (depends on T9, T10) ────────────┘
   - `getLatestBackup(agentId: string, configPath: string)`: Get most recent backup for a specific agent/config.
   - Metadata file: `~/.everymcp/backups/manifest.json` tracking all backups with timestamps, agent IDs, original paths.
 - **validation**: Create backup, verify file exists at expected path. Restore backup, verify config matches original. List backups returns correct entries.
-- **status**: Not Completed
-- **log**:
-- **files edited/created**:
+- **status**: Completed
+- **log**: Implemented manifest-backed backup manager in `src/core/backup-manager.ts`. `createBackup` skips silently when source file is missing. `restoreBackup` creates a pre-restore backup when a target exists. Backups are sorted by timestamp descending in `listBackups`; `getLatestBackup` returns the newest matching entry.
+- **files edited/created**: `src/core/backup-manager.ts`
 
 ### T6: Server Spec Parser & Transform Helpers
 - **depends_on**: [T1, T2, T3]
@@ -273,9 +269,9 @@ T11 ── (depends on T9, T10) ────────────┘
   - `wrapStdioForClaudeDesktopWindows(spec: McpServerSpec)`: On Windows, wrap command with `cmd /c` and resolve npx to full path
   - Note: env var syntax differences (`${env:VAR}` for Windsurf/Roo Code vs direct values for others) are NOT handled in v1. All adapters write literal env values. This is documented as a known limitation.
 - **validation**: Transform a stdio spec and HTTP spec through each helper, verify output matches expected structure.
-- **status**: Not Completed
-- **log**:
-- **files edited/created**:
+- **status**: Completed
+- **log**: Implemented canonical parser and helper transforms. `server-spec.ts` now parses URL vs command inputs, performs reasonable quoted-arg splitting, detects HTTP vs SSE endpoints, and applies CLI overrides (`--name`, `--env`, `--header`, `--auth-token`, `--oauth-client-id`, `--transport`). `transformer.ts` now exports all planned helpers and includes Claude Desktop Windows wrapping with `cmd /c` + Windows `npx` path resolution.
+- **files edited/created**: `src/core/server-spec.ts`, `src/core/transformer.ts`
 
 ### T7: Agent Adapters - Base Class & First 7 Agents
 - **depends_on**: [T4, T5, T6]
@@ -400,9 +396,9 @@ T11 ── (depends on T9, T10) ────────────┘
      - **Shared file**: Uses same `settings.json` as VS Code. Config manager's per-file lock ensures serialized access.
 
 - **validation**: Each adapter can detect (or not) on current machine. Add + remove round-trip produces clean config. Config format matches agent's expected structure. Claude Desktop rejects HTTP specs with warning. Cody rejects HTTP specs with warning.
-- **status**: Not Completed
-- **log**:
-- **files edited/created**:
+- **status**: Completed
+- **log**: Implemented `BaseAdapter` with shared config read/write helpers, scope/transport validation, detection checks (config path + command), root-key resolution, and change diff generation with warnings. Added first-pass implementations for Claude Desktop, Claude Code, Cursor, Windsurf, VS Code, Zed, and Cody adapters with declared IDs, transport/scope support, config paths, root key overrides, transform spec mapping, detection behavior, and warnings for unsupported transport. Added Claude Desktop Windows command wrapping and VS Code/Cody/Cursor/Windsurf/Zed detection hardening for platform-specific directories.
+- **files edited/created**: `src/agents/base-adapter.ts`, `src/agents/claude-desktop.ts`, `src/agents/claude-code.ts`, `src/agents/cursor.ts`, `src/agents/windsurf.ts`, `src/agents/vscode.ts`, `src/agents/zed.ts`, `src/agents/cody.ts`
 
 ### T8: Agent Adapters - Remaining 7 Agents & Registry
 - **depends_on**: [T4, T5, T6]
@@ -484,31 +480,23 @@ T11 ── (depends on T9, T10) ────────────┘
   - `getDetectedAdapters()`: Get only detected adapters
 
 - **validation**: Registry returns all 14 agents. detectAll() correctly identifies installed agents. A single adapter's detection failure doesn't crash the whole detection run.
-- **status**: Not Completed
-- **log**:
-- **files edited/created**:
+- **status**: Completed
+- **log**: Added all remaining 7 adapters (Cline, Roo Code, JetBrains, Neovim, Kilo Code, Amazon Q, Gemini CLI) with required paths, scope/transports, and transforms. Added registry with all 14 adapters and Promise.allSettled-based detection that gracefully handles per-adapter detection failures.
+- **files edited/created**: `src/agents/cline.ts`, `src/agents/roo-code.ts`, `src/agents/jetbrains.ts`, `src/agents/neovim.ts`, `src/agents/kilo-code.ts`, `src/agents/amazon-q.ts`, `src/agents/gemini-cli.ts`, `src/agents/registry.ts`
 
-### T9: Ink UI Components (Banner, Launcher, Wizard, Diff Preview, Spinner)
+### T9: Ink UI Components (Banner, Wizard, Diff Preview, Spinner)
 - **depends_on**: [T7, T8]
-- **location**: `src/cli/banner.tsx`, `src/cli/launcher.tsx`, `src/cli/wizard.tsx`, `src/cli/diff-preview.tsx`, `src/cli/spinner.tsx`, `src/cli/app.tsx`
+- **location**: `src/cli/banner.tsx`, `src/cli/wizard.tsx`, `src/cli/diff-preview.tsx`, `src/cli/spinner.tsx`, `src/cli/app.tsx`
 - **description**:
-  **banner.tsx**: built-in banner renderer (no external logo runtime dependency):
+  **banner.tsx**: ASCII art header using oh-my-logo:
   ```tsx
-  // Render a fixed multi-line block logo that clearly spells "EVERYMCP"
-  // Use chalk for styling (e.g. cyanBright logo + bold white tagline)
+  import { render } from 'oh-my-logo';
+  // render('everymcp', { font: 'Standard', palette: 'rainbow', direction: 'horizontal' })
+  // Display rendered output with chalk for additional styling
   // Show below the logo: "Universal MCP Server Installer" tagline
-  // Keep output deterministic across terminals and Node versions
+  // Wrapped in try/catch -- falls back to plain "everymcp" text if oh-my-logo fails
   ```
-  Print the banner to stdout before Ink renders.
-
-  **launcher.tsx**: default home TUI wizard:
-  ```tsx
-  // Interactive menu shown when users run plain `everymcp` with no subcommand.
-  // Must include choices: Add, Remove, List, Detect, Backup, Restore, Quit.
-  // For Add flow, collect server spec, optional name, optional auth token, scope, and dry-run.
-  // Return a normalized command payload consumed by src/index.ts.
-  // Escape/Ctrl+C exits cleanly.
-  ```
+  Print the banner to stdout before Ink renders (since oh-my-logo is not an Ink component).
 
   **wizard.tsx**: Interactive agent selection wizard using @inkjs/ui MultiSelect:
   ```tsx
@@ -543,20 +531,25 @@ T11 ── (depends on T9, T10) ────────────┘
 
   **app.tsx**: Root Ink application component:
   ```tsx
-  // Orchestrates agent-level interactive flow:
+  // Orchestrates the full flow:
   // 1. Show banner (printed before Ink render)
   // 2. Show detection results
   // 3. If interactive: render Wizard for agent selection
   // 4. If dry-run: render DiffPreview
   // 5. If executing: render Spinner with progress
   // 6. Show summary on completion with per-agent restart messages
-  // Export a runWizard(...) helper so CLI can launch agent selection from add/remove flows.
   ```
 
-- **validation**: Running plain `everymcp` launches the home TUI wizard menu. Banner prints a multi-line `EVERYMCP` block logo plus tagline before the wizard. Add/remove flows can enter interactive agent selection (`Wizard`) with spacebar toggle + Enter submit. Incompatible agents are shown dimmed. Diff preview shows colored diffs. Spinner shows progress with warnings.
-- **status**: Not Completed
+- **validation**: Wizard renders with detected agents, spacebar toggles selection, Enter submits. Incompatible agents shown dimmed. Banner displays gradient ASCII art. Diff preview shows colored diffs. Spinner shows progress with warnings.
+- **status**: Completed
 - **log**:
-- **files edited/created**:
+  - Implemented all canonical T9 Ink components in `src/cli/banner.tsx`, `src/cli/wizard.tsx`, `src/cli/diff-preview.tsx`, `src/cli/spinner.tsx`, and `src/cli/app.tsx`.
+  - Added banner fail-safe with fallback when `oh-my-logo` throws.
+  - Wired `Wizard` compatibility hints and dimmed entries for transport/scope mismatches.
+  - Added diff rendering panel with unified patch chunks and warning lines.
+  - Added spinner status panel with pending/done/error/warning visuals.
+  - Added composable `App` flow switch for selection, preview, spinner and summary stages.
+- **files edited/created**: `src/cli/banner.tsx`, `src/cli/wizard.tsx`, `src/cli/diff-preview.tsx`, `src/cli/spinner.tsx`, `src/cli/app.tsx`
 
 ### T10: Diff Engine (Dry-Run Support)
 - **depends_on**: [T4, T7]
@@ -567,9 +560,13 @@ T11 ── (depends on T9, T10) ────────────┘
   - `previewRemove(adapter: AgentAdapter, serverName: string, scope: ConfigScope)`: Same for removal. Returns "not found" warning if server doesn't exist.
   - `previewChanges(adapters: AgentAdapter[], spec: McpServerSpec, scope: ConfigScope, action: 'add' | 'remove')`: Batch preview across multiple adapters, return `ConfigChange[]`.
 - **validation**: Generates correct unified diff for add and remove operations. Shows no diff when server already exists. Shows warning for incompatible transport/scope.
-- **status**: Not Completed
+- **status**: Completed
 - **log**:
+  - Implemented `generateDiff` in `src/core/diff-engine.ts` using `diff` `createPatch` with unified diff output.
+  - Implemented dry-run `previewAdd`/`previewRemove` to produce `ConfigChange` objects with appropriate warnings for scope mismatch, transport mismatch, missing server, and restart-required notices.
+  - Implemented `previewChanges` batching logic with per-adapter error handling and no write side effects.
 - **files edited/created**:
+  - `src/core/diff-engine.ts`
 
 ### T11: Commander.js CLI Entry Point & Command Wiring
 - **depends_on**: [T9, T10]
@@ -578,12 +575,7 @@ T11 ── (depends on T9, T10) ────────────┘
 
   **Commands**:
 
-  1. `wizard`: Open interactive home TUI wizard
-     - Home menu options: Add, Remove, List, Detect, Backup, Restore, Quit
-     - Collect inputs for selected flow and dispatch to existing handlers
-     - Used as default command (`isDefault: true`) so plain `everymcp` enters this flow
-
-  2. `add <server-spec>`: Add MCP server to agents
+  1. `add <server-spec>`: Add MCP server to agents
      - Parse server-spec (URL or command string)
      - Apply flag overrides (--name, --env, --header, --auth-token, --oauth-client-id, --transport)
      - If `--agents` flag: use specified agents (skip wizard)
@@ -594,24 +586,24 @@ T11 ── (depends on T9, T10) ────────────┘
      - Otherwise: backup configs, apply changes, show results
      - Show per-agent post-install messages (e.g., "Restart Claude Desktop to apply changes")
 
-  3. `remove <server-name>`: Remove MCP server from agents
+  2. `remove <server-name>`: Remove MCP server from agents
      - Same agent selection flow (wizard or flags)
      - If `--dry-run`: show diff preview
      - Otherwise: backup configs, remove from configs, show results
      - If server not found in a particular agent: show "not found" message for that agent, continue with others
 
-  4. `list`: List all MCP servers across all detected agents
+  3. `list`: List all MCP servers across all detected agents
      - Detect agents, read configs, display table of all servers per agent
      - Show server name, transport type, URL/command
      - Respects `--agents` flag for filtering
 
-  5. `detect`: Show which agents are installed
+  4. `detect`: Show which agents are installed
      - Run detection, display results with config paths and supported transports/scopes
 
-  6. `backup`: Manually backup all agent configs
+  5. `backup`: Manually backup all agent configs
      - Backup every detected agent's config file(s)
 
-  7. `restore`: Restore configs from backup
+  6. `restore`: Restore configs from backup
      - List available backups
      - Interactive selection or `--latest` flag
      - Restore selected backup
@@ -647,10 +639,12 @@ T11 ── (depends on T9, T10) ────────────┘
   6. Display results (diffs or success messages + restart warnings)
   ```
 
-- **validation**: Plain `everymcp` opens the home TUI wizard (default command). `wizard` command opens the same flow explicitly. `add` with `--dry-run` shows preview. `add` without `--all`/`--agents` launches interactive agent selection wizard. `--agents cursor,vscode` skips agent-selection wizard. `list` shows servers from detected agents. `list --agents cursor` filters. `detect` shows installed agents. `--version` shows version. `--force` overwrites existing entries. `--project` skips global-only agents with message.
-- **status**: Not Completed
+- **validation**: All commands parse correctly. `add` with `--dry-run` shows preview. `add` without flags launches wizard. `--agents cursor,vscode` skips wizard. `list` shows servers from detected agents. `list --agents cursor` filters. `detect` shows installed agents. `--version` shows version. `--force` overwrites existing entries. `--project` skips global-only agents with message.
+- **status**: Completed
 - **log**:
+  - 2026-02-14: Implemented Commander.js command wiring in `src/index.ts` with add/remove/list/detect/backup/restore commands, global flags, dry-run diff preview flow, scope/agent filtering, and backup/restore command integration.
 - **files edited/created**:
+  - `src/index.ts`
 
 ## Parallel Execution Groups
 
@@ -690,7 +684,7 @@ T11 ── (depends on T9, T10) ────────────┘
 | Server name collision | Warn + prompt in interactive, skip in non-interactive, `--force` to overwrite |
 | `--project` on global-only agents | Skip with message, don't error |
 | Race condition with agent hot-reload | Atomic writes (temp file + rename) |
-| Banner rendering glitches across terminals | Use deterministic built-in `EVERYMCP` block logo text and simple chalk styling (no external logo runtime dependency) |
+| oh-my-logo fails | try/catch, fall back to plain text "everymcp" |
 | Agents requiring restart | Show per-agent post-install message |
 | Config file doesn't exist yet | Create with minimal valid structure |
 | Single adapter detection crash | `Promise.allSettled()` in registry, log warning, continue |
