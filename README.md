@@ -1,5 +1,8 @@
 # everymcp
 
+<img width="766" height="533" alt="image" src="https://github.com/user-attachments/assets/5445cf21-aaa1-496b-8c20-8812e569012a" />
+
+
 Universal MCP server installer CLI. Add, remove, and manage [Model Context Protocol](https://modelcontextprotocol.io/) servers across all your coding agents from a single command.
 
 > **Note:** This project is in early development (v0.1.0) and has not been tested with every supported IDE/agent. If you run into a bug, please [create an issue](https://github.com/am-will/everymcp/issues).
