@@ -26,7 +26,7 @@ Universal MCP server installer CLI. Add, remove, and manage [Model Context Proto
 
 ## Install
 
-### From npm (once published)
+### From npm
 
 ```bash
 npm install -g everymcp
