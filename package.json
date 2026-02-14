@@ -6,9 +6,32 @@
   "bin": {
     "everymcp": "dist/index.js"
   },
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "build": "tsc",
-    "dev": "tsx src/index.ts"
+    "dev": "tsx src/index.ts",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "cli",
+    "installer",
+    "claude",
+    "cursor",
+    "vscode",
+    "windsurf",
+    "zed",
+    "neovim",
+    "cline",
+    "cody"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/am-will/everymcp.git"
   },
   "dependencies": {
     "@inkjs/ui": "^2.0.0",
